@@ -1,0 +1,13 @@
+# build output
+build/
+*.apk
+*.apk.idsig
+
+# signed artifacts / keys
+*.jks
+*.keystore
+
+# editor / OS noise
+.idea/
+.vscode/
+Thumbs.db
