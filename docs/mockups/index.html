@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Quick panel — design mockups</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0;
+    padding: 32px;
+    background: #0b0c0f;
+    color: #f2f3f5;
+    font: 15px/1.4 "Segoe UI", Roboto, sans-serif;
+  }
+  h1 { font-size: 22px; font-weight: 600; margin: 0 0 6px; }
+  p  { color: #9aa1ab; margin: 0 0 28px; max-width: 900px; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 28px;
+  }
+  figure { margin: 0; }
+  img {
+    width: 100%;
+    display: block;
+    border-radius: 10px;
+    border: 1px solid #24262c;
+    cursor: zoom-in;
+  }
+  figcaption {
+    margin-top: 10px;
+    font-size: 13px;
+    color: #b9c0ca;
+  }
+  figcaption b { color: #fff; font-weight: 600; }
+</style>
+</head>
+<body>
+  <h1>Quick panel — four ways to match the launcher</h1>
+  <p>All four sit over the real launcher screenshot, at 1920×1080. Click an image for full size.</p>
+
+  <div class="grid">
+    <figure>
+      <a href="panel-a.png" target="_blank"><img src="panel-a.png" alt="A — frosted right sheet"></a>
+      <figcaption><b>A · Frosted right sheet</b> — same glass tokens as the Home dock.</figcaption>
+    </figure>
+    <figure>
+      <a href="panel-b.png" target="_blank"><img src="panel-b.png" alt="B — dark companion sheet"></a>
+      <figcaption><b>B · Dark companion sheet</b> — glass type and radii, near-black slab.</figcaption>
+    </figure>
+    <figure>
+      <a href="panel-c.png" target="_blank"><img src="panel-c.png" alt="C — bottom glass dock"></a>
+      <figcaption><b>C · Bottom glass dock</b> — mirrors Home's dock position, collides with it.</figcaption>
+    </figure>
+    <figure>
+      <a href="panel-d.png" target="_blank"><img src="panel-d.png" alt="D — centred glass card"></a>
+      <figcaption><b>D · Centred glass card</b> — covers Home's clock, needs heavy fill.</figcaption>
+    </figure>
+  </div>
+</body>
+</html>

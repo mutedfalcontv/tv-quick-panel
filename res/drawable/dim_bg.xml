@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Full-screen dim behind the sheet. The launcher's own scrim runs 15% at the top
+  to 84% at the bottom; this is the same idea, slightly lighter, so the wallpaper
+  still reads while the panel's white text keeps its contrast.
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <gradient
+        android:angle="270"
+        android:startColor="#3805060A"
+        android:endColor="#B805060A" />
+</shape>

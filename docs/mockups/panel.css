@@ -1,0 +1,244 @@
+/* Mockup tokens copied from tv-glass-launcher assets/themes/glass.json.
+   Every colour here is one the panel can actually paint with a ShapeDrawable:
+   no live blur, no elevation trickery. The blur in the backdrop is the photo's
+   own depth of field, not a runtime effect. */
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  width: 1920px;
+  height: 1080px;
+  overflow: hidden;
+}
+
+body {
+  position: relative;
+  background: #0a0a0c url(backdrop.png) center / cover no-repeat;
+  font-family: "Segoe UI", Roboto, sans-serif;
+  color: #F5F5F7;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Launcher scrim: light at the top, heavy at the bottom, so white text holds
+   over any wallpaper without a light theme. The extra black is the panel's own
+   window dim (#66000000 today), which is why Home's dock stays readable but
+   clearly behind the sheet. */
+.scrim {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg,
+    rgba(5, 6, 10, .22) 0%,
+    rgba(5, 6, 10, .42) 55%,
+    rgba(5, 6, 9, .72) 100%);
+}
+
+/* ---- shared sheet ------------------------------------------------------- */
+
+.sheet {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  background: linear-gradient(165deg, rgba(255, 255, 255, .21), rgba(255, 255, 255, .07));
+  border: 1px solid rgba(255, 255, 255, .24);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, .48);
+}
+
+header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.date {
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: .10em;
+  text-transform: uppercase;
+  color: rgba(245, 245, 247, .60);
+}
+
+.time {
+  font-family: "Segoe UI Light", "Roboto Light", sans-serif;
+  font-weight: 300;
+  font-size: 76px;
+  line-height: 1.02;
+  letter-spacing: -.03em;
+  margin-top: 6px;
+}
+
+.actions { display: flex; gap: 12px; }
+
+.icon {
+  width: 56px;
+  height: 56px;
+  border-radius: 28px;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(160deg, rgba(255, 255, 255, .18), rgba(255, 255, 255, .07));
+  border: 1px solid rgba(255, 255, 255, .22);
+  color: #F5F5F7;
+}
+
+.icon svg { width: 24px; height: 24px; }
+
+/* ---- tiles -------------------------------------------------------------- */
+
+.tiles { display: grid; gap: 14px; }
+
+.tile {
+  display: grid;
+  place-items: center;
+  font-size: 18px;
+  font-weight: 500;
+  letter-spacing: .01em;
+  border-radius: 20px;                 /* theme cornerRadiusDp */
+  background: linear-gradient(160deg, rgba(255, 255, 255, .16), rgba(255, 255, 255, .06));
+  border: 1px solid rgba(255, 255, 255, .20);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, .34);
+}
+
+/* Focus: 2dp white ring + 1.04 lift, exactly like TileView. */
+.tile.on {
+  background: linear-gradient(160deg, rgba(255, 255, 255, .32), rgba(255, 255, 255, .15));
+  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, .95), 0 12px 28px rgba(0, 0, 0, .46);
+  transform: scale(1.04);
+}
+
+.hint {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: rgba(245, 245, 247, .48);
+}
+
+.spacer { flex: 1; }
+
+.caption {
+  position: absolute;
+  left: 56px;
+  bottom: 44px;
+  padding: 12px 18px;
+  border-radius: 14px;
+  background: rgba(0, 0, 0, .58);
+  border: 1px solid rgba(255, 255, 255, .18);
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: .06em;
+  color: rgba(255, 255, 255, .88);
+}
+
+/* C and D float over Home's own clock/dock, so they need one extra dark layer
+   under the glass gradient. A is edge-anchored and B is opaque, so they do not. */
+body.c .sheet,
+body.d .sheet {
+  background:
+    linear-gradient(165deg, rgba(255, 255, 255, .16), rgba(255, 255, 255, .05)),
+    rgba(8, 9, 12, .96);
+}
+
+/* ---- A: frosted right sheet (same glass as Home dock) -------------------- */
+
+body.a .sheet {
+  top: 0;
+  right: 0;
+  width: 664px;
+  height: 1080px;
+  padding: 48px 40px 38px 48px;
+  border-radius: 29px 0 0 29px;        /* theme dockRadiusDp */
+}
+
+body.a .tiles {
+  margin-top: 36px;
+  grid-template-columns: repeat(2, 1fr);
+  grid-auto-rows: 104px;
+}
+
+/* ---- B: dark companion sheet ------------------------------------------- */
+
+body.b .sheet {
+  top: 0;
+  right: 0;
+  width: 664px;
+  height: 1080px;
+  padding: 48px 40px 38px 48px;
+  border-radius: 29px 0 0 29px;
+  background: linear-gradient(165deg, rgba(21, 22, 27, .97), rgba(9, 10, 13, .99));
+  border-color: rgba(255, 255, 255, .10);
+}
+
+body.b .tiles {
+  margin-top: 36px;
+  grid-template-columns: repeat(2, 1fr);
+  grid-auto-rows: 104px;
+}
+
+body.b .tile {
+  background: rgba(255, 255, 255, .055);
+  border-color: rgba(255, 255, 255, .09);
+  box-shadow: none;
+}
+
+body.b .tile.on {
+  background: rgba(255, 255, 255, .15);
+  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, .95);
+}
+
+body.b .icon {
+  background: rgba(255, 255, 255, .06);
+  border-color: rgba(255, 255, 255, .10);
+}
+
+/* ---- C: bottom glass dock ---------------------------------------------- */
+
+body.c .sheet {
+  left: 50%;
+  bottom: 56px;
+  transform: translateX(-50%);
+  width: 1568px;
+  height: 324px;
+  padding: 26px 34px 24px 38px;
+  border-radius: 29px;
+}
+
+body.c header { align-items: center; }
+
+body.c .time { font-size: 52px; margin-top: 2px; }
+body.c .date { font-size: 16px; }
+
+body.c .tiles {
+  margin-top: 20px;
+  grid-template-columns: repeat(6, 1fr);
+  grid-auto-rows: 92px;
+}
+
+body.c .tile { font-size: 17px; }
+
+body.c .hint { margin-top: 16px; }
+
+/* ---- D: centred glass card --------------------------------------------- */
+
+body.d .sheet {
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 1288px;
+  height: 664px;
+  padding: 38px 44px 34px;
+  border-radius: 29px;
+}
+
+body.d .time { font-size: 88px; }
+
+body.d .tiles {
+  margin-top: 30px;
+  grid-template-columns: repeat(3, 1fr);
+  grid-auto-rows: 128px;
+  gap: 16px;
+}
+
+body.d .tile { font-size: 20px; }
+
+body.d .sheet { background: linear-gradient(165deg, rgba(255,255,255,.14), rgba(255,255,255,.04)), rgba(8,9,12,.985); }

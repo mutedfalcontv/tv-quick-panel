@@ -13,8 +13,9 @@
         <item name="android:gravity">center</item>
         <item name="android:background">@drawable/tile_bg</item>
         <item name="android:textColor">@color/tile_text</item>
-        <item name="android:textSize">14sp</item>
+        <item name="android:textSize">12sp</item>
         <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="android:letterSpacing">0.01</item>
         <item name="android:focusable">true</item>
         <item name="android:focusableInTouchMode">true</item>
         <item name="android:clickable">true</item>

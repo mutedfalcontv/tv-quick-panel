@@ -19,11 +19,23 @@ Tiles open the same targets the stock launcher / vendor settings use:
 | Wi-Fi | `...connectivity.NetworkActivity` |
 | Bluetooth | `android.settings.SLICE_SETTINGS` on `...activity.VendorSliceActivity` with `slice_uri=content://com.android.tv.settings.accessories.sliceprovider/general` |
 | Accessibility | `...oemlink.AccessibilitySettingsActivity` |
+| Home | `com.ajink.tvglass/.HomeActivity`, falling back to the system home intent |
 | Gear | `.MainSettings` |
 
 `VendorSliceActivity` is exported but gated on `android.permission.WRITE_SECURE_SETTINGS`
 (protection level `signature|privileged|development|installer|role`), which must be granted once
 over ADB.
+
+## Design
+
+The panel matches `tv-glass-launcher`'s glass theme (mockups in `docs/mockups/`):
+translucent white slab with a 1dp hairline, 16dp left corners, 10dp tiles with a
+2dp white focus ring, light display clock, no accent colour. There is no live
+blur - the fill plus the dim is the whole effect, which keeps the panel cheap on
+the TV's GPU.
+
+The Home button exists so the panel is not a one-way door: the launcher lists
+this app under All apps, and this app hands the screen back to the launcher.
 
 ## Build
 

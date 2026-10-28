@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Round glass button for the header actions (Home, gear). Same fill and hairline
+  as a resting tile, plus the 2dp white ring when focused so the D-pad can reach
+  them without guessing where the highlight went.
+-->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_focused="true">
+        <shape android:shape="oval">
+            <solid android:color="#52FFFFFF" />
+            <stroke
+                android:width="2dp"
+                android:color="#F2FFFFFF" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="oval">
+            <solid android:color="#1FFFFFFF" />
+            <stroke
+                android:width="1dp"
+                android:color="#33FFFFFF" />
+        </shape>
+    </item>
+</selector>

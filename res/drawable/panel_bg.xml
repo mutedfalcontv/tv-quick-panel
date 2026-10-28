@@ -1,9 +1,23 @@
 <?xml version="1.0" encoding="utf-8"?>
-<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
-    <solid android:color="#F2141416" />
+<!--
+  The panel slab. Mirrors the launcher's glass theme: a white gradient at 21% -> 7%
+  over the window dim, a 1dp hairline, and the dock's rounded left edge.
+
+  No blur: the translucent fill plus the dim behind it is what sells the glass at
+  ten feet, and it costs one draw call on a weak GPU.
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <gradient
+        android:angle="270"
+        android:startColor="#42FFFFFF"
+        android:endColor="#17FFFFFF" />
     <corners
-        android:topLeftRadius="26dp"
-        android:bottomLeftRadius="26dp"
+        android:topLeftRadius="16dp"
+        android:bottomLeftRadius="16dp"
         android:topRightRadius="0dp"
         android:bottomRightRadius="0dp" />
+    <stroke
+        android:width="1dp"
+        android:color="#3DFFFFFF" />
 </shape>

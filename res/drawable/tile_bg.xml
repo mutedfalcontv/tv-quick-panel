@@ -1,21 +1,47 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  One panel tile. Three states, all on the same 10dp radius:
+
+  focused  a 2dp white ring plus a lifted fill, matching the launcher's
+           focusRingWidthDp / focusScale treatment without the scale animation
+  pressed  a slightly brighter fill so touch still feels alive
+  normal   the resting glass: 16% -> 6% white with a 1dp hairline
+
+  Colours are straight from tv-glass-launcher's glass.json (focusRing #F2FFFFFF,
+  border #38FFFFFF), so a theme change there has an obvious counterpart here.
+-->
 <selector xmlns:android="http://schemas.android.com/apk/res/android">
     <item android:state_focused="true">
         <shape android:shape="rectangle">
-            <solid android:color="#E6EDF3" />
-            <corners android:radius="14dp" />
+            <gradient
+                android:angle="270"
+                android:startColor="#52FFFFFF"
+                android:endColor="#26FFFFFF" />
+            <corners android:radius="10dp" />
+            <stroke
+                android:width="2dp"
+                android:color="#F2FFFFFF" />
         </shape>
     </item>
     <item android:state_pressed="true">
         <shape android:shape="rectangle">
-            <solid android:color="#BFC7CF" />
-            <corners android:radius="14dp" />
+            <solid android:color="#40FFFFFF" />
+            <corners android:radius="10dp" />
+            <stroke
+                android:width="1dp"
+                android:color="#66FFFFFF" />
         </shape>
     </item>
     <item>
         <shape android:shape="rectangle">
-            <solid android:color="#2B2B2E" />
-            <corners android:radius="14dp" />
+            <gradient
+                android:angle="270"
+                android:startColor="#29FFFFFF"
+                android:endColor="#0FFFFFFF" />
+            <corners android:radius="10dp" />
+            <stroke
+                android:width="1dp"
+                android:color="#33FFFFFF" />
         </shape>
     </item>
 </selector>

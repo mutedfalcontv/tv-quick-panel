@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Home glyph: the shortcut back to tv-glass-launcher from inside the panel. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="#F5F5F7">
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M12,3.1 L3,10.4 L3,21 L9.4,21 L9.4,14.6 L14.6,14.6 L14.6,21 L21,21 L21,10.4 Z" />
+</vector>
