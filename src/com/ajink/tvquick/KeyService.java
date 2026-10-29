@@ -50,7 +50,7 @@ public class KeyService extends AccessibilityService {
         if (info == null) {
             info = new AccessibilityServiceInfo();
         }
-        info.eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED;
+        info.eventTypes = 0; // key filtering only; no accessibility events needed
         info.feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC;
         info.flags |= AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS;
         info.notificationTimeout = 100;
