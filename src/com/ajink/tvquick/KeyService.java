@@ -66,7 +66,7 @@ public class KeyService extends AccessibilityService {
      * Diagnostics. Logs volume and gear keys (never D-pad, to keep navigation
      * off the hot path). Turn off once the ramp is confirmed on the TV.
      */
-    private static final boolean DEBUG_KEYS = true;
+    private static final boolean DEBUG_KEYS = false;
 
     /** Delay before the first repeat: matches the usual long-press threshold. */
     private static final long RAMP_START_DELAY_MS = 400;

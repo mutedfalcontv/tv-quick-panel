@@ -148,3 +148,38 @@ sources/dev/vodik7/tvquickactions/KeyAccessibilityService.java   # onKeyEvent
 sources/o5/h.java                                               # key code tables
 res/xml/accessibility_service_config.xml                        # service config
 ```
+## ADB mode (getevent) — relevant to our design
+
+tvQuickActions also ships an **ADB-based remap path** that works **without** the
+accessibility service (see AdbLibService in the decompile). This is what
+informed our final design for the gear button:
+
+- AdbLibService opens a localhost connection to adbd (127.0.0.1:5555) using
+  an app-owned RSA key (stored in the app's private storage, persisted in
+  /data/misc/adb/adb_keys after the user accepts the prompt once).
+- It authenticates with the standard ADB host protocol (CNXN → AUTH TOKEN →
+  AUTH SIGNATURE → AUTH RSAPUBLICKEY → CNXN).
+- Shell commands are sent as \"shell:" + command\ (e.g. \"shell:echo yes"\,
+  \"shell:getevent"\); adbd runs them as the shell user.
+- The getevent stream is read line by line; lines look like
+  \/dev/input/event4: 0001 01f5 00000001\ (EV_KEY, code 501, value 1).
+- Activities are started over the same stream with
+  \m start -a <action> -n <component>\, because the shell uid may start
+  activities from the background while a plain foreground service may not.
+
+### Why we ended up here
+
+On the MOKA R4G (Android 14), **any** accessibility service that requests
+\FLAG_REQUEST_FILTER_KEY_EVENTS\ flips \InputDispatcher.mInputFilterEnabled\,
+which routes every key through \KeyboardInterceptor\. For volume keys the
+interceptor consumes them before a \KeyEntry\ is created, so the platform
+never generates key repeats and volume long-press stops ramping. This was
+measured on the device: \dumpsys input\ reports \InputFilterEnabled: true\
+with either Projectivy's or this app's accessibility service enabled, and
+\alse\ with both off. Projectivy's service causes the same regression.
+
+Therefore the gear button (scancode 501, surfaces as \KEYCODE_MENU\) is
+watched over ADB/getevent instead, and the accessibility service stays off so
+volume keeps its native long-press ramp. See
+\docs/analysis/adb-gear-bridge.md\ for the implementation and
+\docs/bugs/volume-long-press.md\ for the bug write-up.

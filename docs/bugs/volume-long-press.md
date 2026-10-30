@@ -1,6 +1,6 @@
 # Bug: volume long-press does not repeat (single press only)
 
-**Status:** root cause identified, fix implemented, awaiting on-device confirmation
+**Status:** root cause confirmed on device; fix path is now key: **no accessibility service may request key filtering**
 **Reported:** 2026-10-29
 **Device:** MOKA R4G, Android 14 (SDK 34), RC600 remote
 **Area:** remote input / accessibility key filtering
@@ -125,9 +125,37 @@ key action=1 code=24 scan=114 repeat=0 long=false   <- release, ramp stops
 If the volume key lines never appear, the device uses TV routing: the policy
 consumes the keys inside the interceptor and the service is not involved at all.
 
-## Acceptance criteria
+## On-device confirmation of the fix (2026-10-30)
 
-- Holding `VOL +`/`VOL -` ramps the stream volume continuously with the panel
-  service enabled.
-- Gear button still opens/closes the panel.
-- No double stepping: exactly one step per tap.
+* `adb shell dumpsys input | grep InputFilter`:
+  * no accessibility services enabled -> `InputFilterEnabled: false`
+  * Projectivy only -> `true`  <- also kills volume long-press
+  * tv-quick-panel only -> `true`
+* The tv-quick-panel accessibility service therefore has to stay **off**.
+  The gear button is now watched over ADB instead (`docs/analysis/adb-gear-bridge.md`).
+
+## Remaining acceptance criterion
+
+With the accessibility services off, holding `VOL +` / `VOL -` must ramp the
+stream volume continuously. The input-filter precondition for that ramp is
+verified on the device; a physical hold still needs to be done on the TV.
+
+## Update 2026-10-30 (ADB path)
+
+The volume ramp itself never runs inside `KeyService` on this TV (the policy
+eats volume keys before they reach any accessibility service), so the ramp can
+only come back by dropping the key filter entirely.
+
+Action taken on the TV:
+
+```sh
+adb shell settings put secure enabled_accessibility_services ""
+```
+
+`dumpsys input` now reports `InputFilterEnabled: false`, which is the state the
+platform needs for the native long-press ramp to be generated.
+
+The gear button is handled by the ADB bridge
+(`com.ajink.tvquick.GearBridgeService` + `com.ajink.tvquick.adb.*`), which reads
+raw events through `getevent` on the device's adbd. See
+`docs/analysis/adb-gear-bridge.md`.

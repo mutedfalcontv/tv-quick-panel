@@ -98,6 +98,10 @@ public class QuickPanelActivity extends Activity {
         findViewById(R.id.home).setOnClickListener(v -> launchLauncher());
 
         findViewById(R.id.tile_inputs).requestFocus();
+
+        // The bridge has to be alive before the gear can be used, and the panel
+        // is the only thing that starts it on a fresh install.
+        GearBridgeService.start(this);
     }
 
     private void bind(int id, final ComponentName target, final String fallbackAction) {

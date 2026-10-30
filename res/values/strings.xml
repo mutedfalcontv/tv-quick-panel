@@ -12,4 +12,7 @@
     <string name="home">Home</string>
     <string name="hint_panel">Gear opens settings - Home returns to launcher</string>
     <string name="launcher_unavailable">Launcher unavailable</string>
+    <string name="bridge_title">Gear button</string>
+    <string name="bridge_channel">Gear button bridge</string>
+    <string name="bridge_state">ADB: %1$s</string>
 </resources>
