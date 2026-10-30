@@ -1,6 +1,6 @@
 # Bug: volume long-press does not repeat (single press only)
 
-**Status:** open, unconfirmed cause
+**Status:** root cause identified, fix implemented, awaiting on-device confirmation
 **Reported:** 2026-10-29
 **Device:** MOKA R4G, Android 14 (SDK 34), RC600 remote
 **Area:** remote input / accessibility key filtering
@@ -20,155 +20,114 @@ The user reports this is a regression: "it used to work before".
 3. Observe: one step only (actual) vs continuous ramp (expected).
 4. Tap `VOL +` repeatedly: each tap steps once, so the key itself is alive.
 
-## What is on the device
+## Root cause (AOSP 14 source, verified)
 
-Accessibility services enabled at the time of the report:
+The accessibility key filter is not a passive observer: enabling it changes how
+the whole input pipeline works.
 
-```
-com.spocky.projengmenu/.services.ProjectivyAccessibilityService
-com.ajink.tvquick/.KeyService
-```
+1. `InputDispatcher::shouldSendKeyToInputFilterLocked()` returns
+   `mInputFilterEnabled` for **every** key event. `mInputFilterEnabled` becomes
+   true as soon as any accessibility service requests
+   `FLAG_REQUEST_FILTER_KEY_EVENTS`. From that moment keys no longer go straight
+   from the driver to the focused app.
 
-`KeyService` (tv-quick-panel) requests `FLAG_REQUEST_FILTER_KEY_EVENTS` and
-returns `false` for every scancode except the gear button's 501. In theory a
-service that returns `false` must not consume the event, repeats included, but
-the framework does route every key event, including `ACTION_DOWN` with
-`repeatCount > 0`, through `onKeyEvent` while a filtering service is enabled.
+2. `KeyboardInterceptor` (system_server) is the handler for those keys and has a
+   volume special case:
 
-The launcher (`com.ajink.tvglass`) is not a suspect by code inspection:
-`HomeActivity.onKeyDown` only claims MENU/SETTINGS, and `AppsActivity` /
-`SettingsActivity` do the same. Volume falls through to `super`.
+   ```java
+   // services/accessibility/java/com/android/server/accessibility/KeyboardInterceptor.java
+   private long getEventDelay(KeyEvent event, int policyFlags) {
+       int keyCode = event.getKeyCode();
+       if ((keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) || (keyCode == KeyEvent.KEYCODE_VOLUME_UP)) {
+           return mPolicy.interceptKeyBeforeDispatching(null, event, policyFlags);
+       }
+       return 0;
+   }
+   ```
 
-## Suspects, most likely first
+   * policy returns `-1` (TV routing): event swallowed, volume already adjusted
+     by `PhoneWindowManager.dispatchDirectAudioEvent()`.
+   * policy returns `0` (no TV routing): event is forwarded to accessibility
+     services, and if none handles it the platform **re-injects** it into
+     `InputDispatcher`.
 
-1. **Accessibility key filtering interacting with key repeat.** Two filtering
-   services are enabled. Either one returning `true` for a repeat would swallow
-   it. Projectivy is the one with unknown behaviour; `KeyService` returns
-   `false`, but `onServiceConnected` rewrites the service info with
-   `setServiceInfo()`, which is worth verifying did not clear
-   `FLAG_REQUEST_FILTER_KEY_EVENTS` handling of repeats.
-2. **Projectivy's own remote handling.** It predates the panel, but a Projectivy
-   update could have changed repeat handling at the same time the panel was
-   installed, which would look like \"the panel broke it\".
-3. **Firmware input dispatcher.** The R4G may generate volume repeats in the
-   kernel/HAL rather than in the app processor; a change in `dumpsys input`
-   repeat settings would show this.
-4. **Launcher focus path.** Unlikely, but cheap to rule out: the launcher holds
-   focus on Home, and if it consumed repeats the ramp would stop there.
+3. Re-injection loses the native repeat chain. `InputDispatcher::notifyKey()`
+   hardcodes the repeat count:
 
-## Fix attempted in KeyService
+   ```cpp
+   // InputDispatcher tracks and generates key repeats on behalf of
+   // whatever notifies it, so repeatCount should always be set to 0
+   constexpr int32_t repeatCount = 0;
+   ```
 
-- `onKeyEvent` fast path is a single integer comparison (`scanCode != GEAR_SCANCODE`)
-  followed by `return false`. No object allocation, no logging on the hot path.
-- Volume key scan codes (114/115) are documented but not special-cased beyond the
-  fast path; they fall through to `return false` like every other non-gear key.
-- Diagnostic logging is available behind `DEBUG_VOLUME = true` (off by default) to
-  capture `keyCode / scanCode / action / repeatCount` for every volume event.
-- Gear key repeats are still consumed (`return true`) but do nothing, so holding
-  the gear button does not toggle the panel repeatedly.
+   Repeats are generated per `KeyEntry` inside `dispatchKeyLocked()`. A key
+   swallowed by the input filter never creates that `KeyEntry`, so the
+   re-injected copy is just a fresh press. Result: one step per physical press,
+   no ramp.
 
-The remaining suspected cause is the IPC overhead of routing every key event
-(including volume repeats) through the accessibility service's `onKeyEvent`. Even
-though the method returns `false` immediately, the synchronous Binder call from
-the system server to the service process introduces latency that can break the
-repeat timing on some Android versions. This cannot be eliminated while the
-service uses `FLAG_REQUEST_FILTER_KEY_EVENTS`; it can only be minimised.
+4. `interceptKeyResult` is cached per `KeyEntry` (`InputDispatcher.cpp`), so the
+   filter/policy is consulted once per press and repeats normally bypass it.
+   Returning `false` quickly from `onKeyEvent` therefore cannot help - the
+   damage is done by the event being routed through the filter at all.
 
-## Diagnostics to run
+This also explains why the earlier `setServiceInfo()` change made things worse in
+a different way: `setServiceInfo()` replaces the entire config, so passing a
+fresh `AccessibilityServiceInfo` silently dropped
+`FLAG_REQUEST_FILTER_KEY_EVENTS` and disabled gear detection
+(build `5848d22`).
+
+## Why tvQuickActions does not have this problem
+
+`tvQuickActions` 3.5.3 uses exactly the same mechanism
+(`flagRequestFilterKeyEvents` in its accessibility XML) and does **not** special
+case volume anywhere in its code. Its only advantage is that its remap engine
+consumes the keys it acts on, so those keys never take the re-injection path.
+For unremapped volume keys it is in the same position as this app.
+
+See `docs/analysis/tvquickactions-key-interception.md` for the full decompile
+analysis.
+
+## Fix implemented (KeyService)
+
+Take the volume keys over instead of letting them fall through the filter:
+
+* `VOLUME_UP` / `VOLUME_DOWN` `ACTION_DOWN` (`repeatCount == 0`): one
+  `AudioManager.adjustStreamVolume(STREAM_MUSIC, ...)` step with
+  `FLAG_SHOW_UI`, then a self-scheduled ramp every 120 ms until `ACTION_UP`
+  (first repeat after 400 ms, hard stop after 8 s).
+* `VOLUME_MUTE`: toggle once.
+* The events are consumed (`return true`), so the platform never re-injects them
+  and the ramp no longer depends on framework repeat delivery.
+* If the platform ever does deliver real repeats (`repeatCount > 0`, TV-routing
+  devices), the local ramp is cancelled so the volume cannot step twice.
+* Everything else still returns `false` from a single integer comparison.
+
+Service config stays in `res/xml/key_service.xml`; `onServiceConnected()` no
+longer calls `setServiceInfo()`.
+
+## Diagnostics
+
+`DEBUG_KEYS = true` in `KeyService` logs volume and gear keys only (D-pad stays
+off the hot path):
 
 ```sh
-# 1. Does the ramp return with the panel's service off (Projectivy kept)?
-adb shell settings put secure enabled_accessibility_services \\
-  'com.spocky.projengmenu/.services.ProjectivyAccessibilityService'
-# hold VOL+, then restore:
-adb shell settings put secure enabled_accessibility_services \\
-  'com.spocky.projengmenu/.services.ProjectivyAccessibilityService:com.ajink.tvquick/.KeyService'
-
-# 2. Does it return with only the panel's service on?
-adb shell settings put secure enabled_accessibility_services \\
-  'com.ajink.tvquick/.KeyService'
-
-# 3. Raw events and repeat counts while holding the key
-adb shell getevent -l
 adb logcat -c && adb logcat -s TvQuickKey:D
-
-# 4. Input dispatcher repeat configuration
-adb shell dumpsys input | findstr /i "repeat key"
+# press VOL+ once, then hold VOL+ for two seconds
 ```
 
-Instrument `KeyService.onKeyEvent` temporarily by setting `DEBUG_VOLUME = true`,
-rebuild, and hold `VOL +`. If repeats arrive with `repeatCount > 0` and the
-method returns `false`, the panel is not the cause and the next step is disabling
-Projectivy. If repeats do NOT arrive, the framework is suppressing them because
-of the service's presence, and the fix is to avoid `FLAG_REQUEST_FILTER_KEY_EVENTS`
-entirely (e.g. by detecting the gear button via a different mechanism).
+Expected when the fix is active:
 
-## Workaround until fixed
+```
+key action=0 code=24 scan=114 repeat=0 long=false   <- press, one step
+key action=1 code=24 scan=114 repeat=0 long=false   <- release, ramp stops
+```
 
-- Tap the volume key repeatedly instead of holding it.
-- Or disable the tv-quick-panel accessibility service while not using the panel
-  (the panel's gear button stops working).
+If the volume key lines never appear, the device uses TV routing: the policy
+consumes the keys inside the interceptor and the service is not involved at all.
 
 ## Acceptance criteria
 
 - Holding `VOL +`/`VOL -` ramps the stream volume continuously with the panel
   service enabled.
 - Gear button still opens/closes the panel.
-- No volume key event is consumed by either app: verify with the
-  `KeyService` repeat log showing `return false` for every volume event.
-
-1. **Accessibility key filtering interacting with key repeat.** Two filtering
-   services are enabled. Either one returning `true` for a repeat would swallow
-   it. Projectivy is the one with unknown behaviour; `KeyService` returns
-   `false`, but `onServiceConnected` rewrites the service info with
-   `setServiceInfo()`, which is worth verifying did not clear
-   `FLAG_REQUEST_FILTER_KEY_EVENTS` handling of repeats.
-2. **Projectivy's own remote handling.** It predates the panel, but a Projectivy
-   update could have changed repeat handling at the same time the panel was
-   installed, which would look like "the panel broke it".
-3. **Firmware input dispatcher.** The R4G may generate volume repeats in the
-   kernel/HAL rather than in the app processor; a change in `dumpsys input`
-   repeat settings would show this.
-4. **Launcher focus path.** Unlikely, but cheap to rule out: the launcher holds
-   focus on Home, and if it consumed repeats the ramp would stop there.
-
-## Diagnostics to run
-
-```sh
-# 1. Does the ramp return with the panel's service off (Projectivy kept)?
-adb shell settings put secure enabled_accessibility_services \
-  'com.spocky.projengmenu/.services.ProjectivyAccessibilityService'
-# hold VOL+, then restore:
-adb shell settings put secure enabled_accessibility_services \
-  'com.spocky.projengmenu/.services.ProjectivyAccessibilityService:com.ajink.tvquick/.KeyService'
-
-# 2. Does it return with only the panel's service on?
-adb shell settings put secure enabled_accessibility_services \
-  'com.ajink.tvquick/.KeyService'
-
-# 3. Raw events and repeat counts while holding the key
-adb shell getevent -l
-adb logcat -c && adb logcat | findstr /i "KeyEvent repeat volume"
-
-# 4. Input dispatcher repeat configuration
-adb shell dumpsys input | findstr /i "repeat key"
-```
-
-Instrument `KeyService.onKeyEvent` temporarily to log
-`keyCode / scanCode / action / repeatCount` for every event, then hold `VOL +`.
-If repeats arrive with `repeatCount > 0` and the method returns `false`, the
-panel is not the cause and the next step is disabling Projectivy.
-
-## Workaround until fixed
-
-- Tap the volume key repeatedly instead of holding it.
-- Or disable the tv-quick-panel accessibility service while not using the panel
-  (the panel's gear button stops working).
-
-## Acceptance criteria
-
-- Holding `VOL +`/`VOL -` ramps the stream volume continuously with the panel
-  service enabled.
-- Gear button still opens/closes the panel.
-- No volume key event is consumed by either app: verify with the
-  `KeyService` repeat log showing `return false` for every volume event.
+- No double stepping: exactly one step per tap.
