@@ -112,16 +112,32 @@ Two details cost real debugging time and are worth recording:
 
 ### Streams
 
-`OPEN` with `shell:getevent\0` starts `getevent` as the shell user. Output
-arrives as `WRTE` packets; each one is acked with `OKAY` for flow control.
-Lines have the form:
+`OPEN` with `shell:cat /dev/input/event4\0` streams the device node as the shell
+user. Output arrives as `WRTE` packets; each one is acked with `OKAY` for flow
+control. The payload is a sequence of `struct input_event`:
 
-```
-/dev/input/event4: 0001 01f5 00000001
-```
+| offset (32-bit) | field |
+| --- | --- |
+| 0 | `timeval.tv_sec` (4 bytes) |
+| 4 | `timeval.tv_usec` (4 bytes) |
+| 8 | `type` (u16, little endian) |
+| 10 | `code` (u16) |
+| 12 | `value` (s32) |
 
-`0001` = `EV_KEY`, `01f5` = 501, value `1` = down. The bridge ignores every
-other code, so volume, D-pad and media keys never touch this path.
+A 64-bit process sees 8-byte `timeval` fields instead (24-byte records), so the
+bridge picks the record size from `Process.is64Bit()`. The gear is `type=1`
+(`EV_KEY`), `code=501`, value `1` (down) / `0` (up). Every other code is ignored,
+so volume, D-pad and media keys never touch this path.
+
+Two gotchas cost real debugging time here:
+
+* **`getevent` cannot be used as the stream.** Its stdout is block-buffered when
+  it is a pipe, so a handful of key presses never arrive (the app saw nothing for
+  minutes). `cat` on the node writes each 16-byte record immediately.
+* **The `OKAY` ack must be `(our stream id, adbd's stream id)`.** Sending them
+  back in the order they arrived (`arg0, arg1`) is silently ignored by adbd; its
+  send window never reopens, and the stream stalls after the first `WRTE` - one
+  gear press worked, every press after it did nothing.
 
 ### Opening the panel
 

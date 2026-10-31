@@ -9,6 +9,7 @@ import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.os.Build;
 import android.os.IBinder;
+import android.os.Process;
 import android.os.SystemClock;
 import android.util.Log;
 
@@ -34,10 +35,11 @@ import java.security.PrivateKey;
  * volume key never ramps - one step per press. Projectivy's accessibility
  * service causes exactly the same thing.
  *
- * <p>So this service keeps the filter off and instead reads raw input events
- * with {@code getevent} as the shell user, over a localhost connection to adbd.
- * Volume keys keep their native long-press ramp because nothing in the input
- * path changed.
+ * <p>So this service keeps the filter off and instead reads the RC600's evdev
+ * node with {@code cat} as the shell user, over a localhost connection to adbd.
+ * (The text form of {@code getevent} is not used: its stdout is block-buffered
+ * into a pipe, so a few key presses never arrive.) Volume keys keep their native
+ * long-press ramp because nothing in the input path changed.
  *
  * <h3>Launching the panel</h3>
  * A foreground service is not allowed to start activities from the background
@@ -75,10 +77,23 @@ public class GearBridgeService extends Service {
 
     /** Kernel scancode of the gear button (KEY_BRL_DOT5 on the RC600). */
     private static final int GEAR_SCANCODE = 501;
-    /** EV_KEY */
-    private static final String EV_KEY = "0001";
-    /** Set to true to log every getevent line (very noisy, debugging only). */
-    private static final boolean DEBUG_LINES = false;
+    /** struct input_event type for EV_KEY. */
+    private static final int EV_KEY = 0x01;
+
+    /**
+     * The RC600 remote's evdev node. Hardcoded because the app cannot enumerate
+     * /dev/input itself; it matches this TV's stable enumeration (verified with
+     * {@code getevent -p}, where both the RC600 and the IR receiver report
+     * scancode 0x01f5).
+     */
+    private static final String GEAR_DEVICE = "/dev/input/event4";
+
+    /**
+     * Size of {@code struct input_event}: timeval (two longs) + u16 type +
+     * u16 code + s32 value. 16 bytes in a 32-bit process, 24 in a 64-bit one.
+     */
+    private final int mEventSize =
+            (Build.VERSION.SDK_INT >= 23 && Process.is64Bit()) ? 24 : 16;
 
     /** Debounce for the gear, in case getevent repeats the down event. */
     private static final long GEAR_DEBOUNCE_MS = 250;
@@ -193,29 +208,28 @@ public class GearBridgeService extends Service {
                 backoff = 1000;
                 authFailures = 0;
                 setState("connected");
-                Log.i(TAG, "adb connected, opening getevent");
+                Log.i(TAG, "adb connected, opening the RC600 node");
 
-                AdbConnection.Stream stream = connection.openShell("getevent");
-                Log.i(TAG, "getevent running");
+                AdbConnection.Stream stream = connection.openShell("cat " + GEAR_DEVICE);
+                Log.i(TAG, "reading " + GEAR_DEVICE);
 
-                byte[] buffer = new byte[4096];
-                StringBuilder line = new StringBuilder(128);
+                byte[] chunk = new byte[4096];
+                byte[] event = new byte[mEventSize];
+                int have = 0;
                 int n;
                 long received = 0;
-                while (mRunning && (n = stream.read(buffer)) >= 0) {
+                while (mRunning && (n = stream.read(chunk)) >= 0) {
                     received += n;
                     for (int i = 0; i < n; i++) {
-                        char ch = (char) (buffer[i] & 0xFF);
-                        if (ch == '\n') {
-                            handleLine(line);
-                            line.setLength(0);
-                        } else if (ch != '\r' && line.length() < 512) {
-                            line.append(ch);
+                        event[have++] = chunk[i];
+                        if (have == mEventSize) {
+                            handleEvent(event);
+                            have = 0;
                         }
                     }
                 }
                 if (mRunning) {
-                    Log.w(TAG, "getevent ended after " + received + " bytes, tail=" + line);
+                    Log.w(TAG, "input stream ended after " + received + " bytes");
                     backoff = 2000;
                 }
             } catch (AdbConnection.AuthRequiredException e) {
@@ -271,38 +285,25 @@ public class GearBridgeService extends Service {
     }
 
     /**
-     * Parses one {@code getevent} line:
-     * {@code /dev/input/event4: 0001 01f5 00000001} (type, code, value in hex).
+     * Parses one {@code struct input_event}: timeval, then u16 type, u16 code
+     * and s32 value, all little-endian.
+     *
+     * <p>The text output of {@code getevent} is not usable here: when stdout is
+     * a pipe it is block-buffered, so a handful of key presses never arrive.
+     * {@code cat} on the device node streams each event as it happens.
      */
-    private void handleLine(CharSequence raw) {
-        if (DEBUG_LINES) {
-            Log.d(TAG, "ev: " + raw);
-        }
-        int colon = -1;
-        for (int i = 0; i < raw.length(); i++) {
-            if (raw.charAt(i) == ':') {
-                colon = i;
-                break;
-            }
-        }
-        if (colon < 0 || raw.length() < colon + 3) {
+    private void handleEvent(byte[] ev) {
+        // Skip the timeval, which is two 4-byte or two 8-byte fields.
+        final int off = mEventSize == 24 ? 16 : 8;
+        int type = (ev[off] & 0xFF) | ((ev[off + 1] & 0xFF) << 8);
+        int code = (ev[off + 2] & 0xFF) | ((ev[off + 3] & 0xFF) << 8);
+        if (type != EV_KEY || code != GEAR_SCANCODE) {
             return;
         }
-        String[] parts = raw.subSequence(colon + 1, raw.length()).toString().trim().split("\\s+");
-        if (parts.length < 3 || !EV_KEY.equals(parts[0])) {
-            return;
-        }
-        int code;
-        int value;
-        try {
-            code = Integer.parseInt(parts[1], 16);
-            value = Integer.parseInt(parts[2], 16);
-        } catch (NumberFormatException e) {
-            return;
-        }
-        if (code != GEAR_SCANCODE) {
-            return;
-        }
+        int value = (ev[off + 4] & 0xFF)
+                | ((ev[off + 5] & 0xFF) << 8)
+                | ((ev[off + 6] & 0xFF) << 16)
+                | ((ev[off + 7] & 0xFF) << 24);
         if (value == 0) {
             // Release: re-arm the latch.
             mGearDown = false;

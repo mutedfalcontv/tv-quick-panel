@@ -269,8 +269,12 @@ public final class AdbConnection implements Closeable {
                                     + (stream == null ? " (no stream)" : ""));
                         }
                         if (p.command == CMD_WRTE) {
-                            // Flow control: adbd blocks the stream until acked.
-                            send(CMD_OKAY, p.arg0, p.arg1, EMPTY);
+                            // Flow control: adbd blocks the stream until acked, and
+                            // the ack must carry OUR stream id first, adbd's second.
+                            // Echoing the ids in the order they arrived gets the ack
+                            // ignored, so adbd's send window never reopens and the
+                            // stream stalls after one packet.
+                            send(CMD_OKAY, p.arg1, p.arg0, EMPTY);
                             if (stream != null) {
                                 stream.offer(p.payload);
                             }
@@ -285,6 +289,7 @@ public final class AdbConnection implements Closeable {
                         }
                     }
                 } catch (IOException e) {
+                    Log.w("TvGearBridge", "reader stopped: " + e);
                     if (!closed) {
                         closeQuietly();
                     }
