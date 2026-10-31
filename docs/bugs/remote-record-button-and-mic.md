@@ -1,8 +1,9 @@
 # Bug: the remote's record/voice button does nothing, and its mic is unusable
 
-**Status:** reported as a regression ("used to work before an update"); the remote
-key is mapped to the Assistant in the bridge, but the remote's own mic still has no
-audio path. Update timeline and the self-help steps are below.
+**Status:** reproduced (2026-10-31). The Assistant opens and records, but the
+built-in mic delivers no audio and the remote has no audio channel at all.
+Re-pairing the RC600 did not change that. Workarounds and the remaining options
+are at the end.
 **Device:** MOKA R4G, Android 14 (SDK 34), RC600 remote
 **Area:** remote input / Google Assistant / audio input
 **Related:** `docs/analysis/rc600-remote-buttons.md`
@@ -141,6 +142,43 @@ Steps worth trying, cheapest first:
 
 Rolling the Google app back is not possible without root; re-pairing is the only
 non-destructive reset for the remote side.
+
+## Confirmation after re-pairing (2026-10-31)
+
+The RC600 was removed and paired again. Nothing changed:
+
+* Profile policy is still `HID_HOST=100` with every audio profile unset;
+  `HeadsetService.mActiveDevice` is `null` and `mVoiceRecognitionStarted=false`.
+* The bridge reconnected on its own after the node was recreated (the stream ends
+  when the remote unpairs; the worker reconnects in ~2 s after the auto-approval).
+* The Assistant listens - `AudioRecord` routes to `AUDIO_DEVICE_IN_BUILTIN_MIC` -
+  and then returns an empty result:
+
+  ```
+  #onRecognitionStateChanged: state[FINAL_RESULT] recognized_speech: ""
+  LIBAS_INTERACTION_NO_SPEECH_DETECTED
+  ```
+
+* The mic is not muted in software:
+  `mic mute FromSwitch=false FromRestrictions=false FromApi=false`.
+
+So the built-in mic path is open but silent, and the remote has no capture
+channel. The two Google app updates (katniss 2026-10-27, GMS 2026-10-30) remain
+the likely trigger for the regression, but they cannot be rolled back without
+root.
+
+## Remaining options
+
+1. **Phone ATV remote app** - confirmed working; it streams audio over Wi-Fi, so
+   it does not depend on either microphone path.
+2. **USB microphone** - the audio policy exposes a `usb_device_input` mix port,
+   so a USB mic should become an input device the Assistant can use.
+3. **Bluetooth headset** - `WH-CH720N` is already paired with HFP/A2DP; if the
+   Assistant picks it up when it is the active device, that is another mic path.
+4. **Clear the Assistant app data** (`com.google.android.katniss`) as a last
+   resort; it resets Assistant setup and requires signing in again.
+5. Check the TV body for a physical mic switch (some models have one) before
+   concluding the built-in mic is dead.
 
 ## Open questions
 
