@@ -1,235 +1,207 @@
 package com.ajink.tvquick;
 
 import android.accessibilityservice.AccessibilityService;
+import android.accessibilityservice.AccessibilityServiceInfo;
+import android.content.BroadcastReceiver;
+import android.content.ComponentName;
+import android.content.Context;
 import android.content.Intent;
-import android.media.AudioManager;
-import android.os.Handler;
-import android.os.Looper;
+import android.content.IntentFilter;
+import android.os.Build;
 import android.os.SystemClock;
 import android.util.Log;
 import android.view.KeyEvent;
 import android.view.accessibility.AccessibilityEvent;
 
 /**
- * Intercepts the gear button of the RC600 remote and keeps volume long-press
- * working.
+ * Turns the RC600 gear button into the quick panel's on/off switch, and gets out
+ * of the way of every other key.
  *
- * <h3>Gear button</h3>
- * The button reports scancode 501 (KEY_BRL_DOT5 on the kernel side). No
- * keylayout entry maps it, so it arrives as KEYCODE_MENU with the scancode
- * preserved, and nothing else on the system handles it. Accessibility key
- * filtering lets us take it before the window manager sees it.
+ * <h3>Why an accessibility filter is needed at all</h3>
+ * The gear reports scancode 501 (KEY_BRL_DOT5), which the TV's RC600.kl maps to
+ * KEYCODE_NOTIFICATION. SystemUI claims that keycode before any activity sees it:
+ * TvNotificationPanel tries to launch
+ * {@code android.app.action.TOGGLE_NOTIFICATION_HANDLER_PANEL}, but it only starts
+ * the handler when the resolved activity belongs to a <em>system</em> package and
+ * requires STATUS_BAR_SERVICE. A normally installed app can never match that, so
+ * without a filter the button does nothing at all on this TV.
  *
- * <h3>Why the volume long-press broke</h3>
- * When any accessibility service sets FLAG_REQUEST_FILTER_KEY_EVENTS the
- * platform enables the global input filter (InputDispatcher::
- * shouldSendKeyToInputFilterLocked -> mInputFilterEnabled). From then on every
- * key event goes through system_server's KeyboardInterceptor instead of
- * straight to the focused app.
+ * <h3>Why the filter is not always on</h3>
+ * Requesting FLAG_REQUEST_FILTER_KEY_EVENTS switches on the platform's global
+ * input filter, and that has a hard cost on this build: the window policy consumes
+ * volume keys inside the interceptor, so the service never receives them, and the
+ * key's DOWN never reaches InputDispatcher either - which means no key repeats are
+ * generated. A held volume key then moves one step and stops. Measured on the TV:
+ * filter off ramps, filter on gives a single step.
  *
- * KeyboardInterceptor has a volume special case (AOSP 14,
- * services/accessibility/.../KeyboardInterceptor.java:getEventDelay): for
- * VOLUME_UP/VOLUME_DOWN it first asks the WindowManagerPolicy
- * (interceptKeyBeforeDispatching(null, event, policyFlags)) and only forwards
- * the key to accessibility services if the policy did not consume it. When the
- * policy does not consume it (devices without TV routing) and no service
- * handles it, the platform re-injects the event into InputDispatcher.
+ * <p>Nothing app-side can repair that (the key cannot be seen, and re-injecting is
+ * a system-only permission), so the filter is enabled only while this app is the
+ * foreground app - the launcher or the panel - where the gear is the useful key
+ * and volume is not. As soon as another app comes forward the filter is dropped
+ * and the native volume ramp works exactly as stock.
  *
- * InputDispatcher generates key repeats per KeyEntry (dispatchKeyLocked) and
- * hardcodes repeatCount = 0 for everything that enters through notifyKey
- * (InputDispatcher.cpp: "InputDispatcher tracks and generates key repeats on
- * behalf of whatever notifies it, so repeatCount should always be set to 0").
- * A key that is swallowed by the input filter never creates that KeyEntry, so
- * the re-injected copy is a fresh press: the system stops generating repeats
- * and the volume ramps exactly one step per physical press.
+ * <h3>Why window events are not enough</h3>
+ * TYPE_WINDOW_STATE_CHANGED fires when a window is added or its title changes, not
+ * when an existing window is brought back to the front. Returning to the launcher
+ * (or to a panel that was covered by a settings page) therefore produces no event,
+ * and the filter would stay off. Both of our activities broadcast
+ * {@link #ACTION_OURS_FOREGROUND} from {@code onResume} to cover that case; the
+ * window events still handle every other app.
  *
- * <h3>Fix</h3>
- * Do not let the volume keys fall through the filter unhandled. We consume
- * them (return true) and drive the ramp ourselves: one step on the initial
- * press, then a self-scheduled repeat every {@link #RAMP_INTERVAL_MS} ms until
- * the key is released, capped at {@link #RAMP_MAX_MS}. The step is applied with
- * AudioManager + FLAG_SHOW_UI, so the on-screen volume bar still appears.
- *
- * If the device uses TV routing the policy consumes volume keys inside the
- * interceptor and they never reach this service, so this code stays inert and
- * the platform keeps handling them - no double stepping.
- *
- * Reference: docs/bugs/volume-long-press.md and
- * docs/analysis/tvquickactions-key-interception.md.
+ * <h3>Toggle without tracking state</h3>
+ * The panel is started with the same action SystemUI would use. The first start
+ * creates the activity (opens); any later start is delivered to the single-top
+ * instance, whose onNewIntent finishes it (closes). No visibility flag is kept
+ * here, because the panel is briefly paused around that hand-off and a flag
+ * latched the wrong value.
  */
 public class KeyService extends AccessibilityService {
 
     private static final String TAG = "TvQuickKey";
-    static final int GEAR_SCANCODE = 501;
+    private static final int GEAR_SCANCODE = 501;
+
+    /** Same action SystemUI's notification-panel handler would launch. */
+    private static final String ACTION_TOGGLE_NOTIFICATION_PANEL =
+            "android.app.action.TOGGLE_NOTIFICATION_HANDLER_PANEL";
+
+    private static final ComponentName PANEL =
+            new ComponentName("com.ajink.tvquick", "com.ajink.tvquick.QuickPanelActivity");
+
+    private static final String LAUNCHER_PACKAGE = "com.ajink.tvglass";
+
+    /** Both apps are ours, so the filter may be on while either is in front. */
+    private static final String PANEL_PACKAGE = "com.ajink.tvquick";
 
     /**
-     * Diagnostics. Logs volume and gear keys (never D-pad, to keep navigation
-     * off the hot path). Turn off once the ramp is confirmed on the TV.
+     * Sent by the launcher and the panel when they resume, so the filter comes
+     * back even though resuming an existing window raises no accessibility event.
      */
-    private static final boolean DEBUG_KEYS = false;
+    static final String ACTION_OURS_FOREGROUND =
+            "com.ajink.tvquick.action.OURS_FOREGROUND";
 
-    /** Delay before the first repeat: matches the usual long-press threshold. */
-    private static final long RAMP_START_DELAY_MS = 400;
-    /** Repeat period while the key is held. */
-    private static final long RAMP_INTERVAL_MS = 120;
-    /** Hard stop so a missed ACTION_UP cannot run away with the volume. */
-    private static final long RAMP_MAX_MS = 8000;
+    /**
+     * When an activity of ours resumes, the window it covered is being torn down
+     * and its own window-state event can land a moment later (measured: 140 ms).
+     * Events from other packages inside this window are that tail, not a real
+     * switch, and must not turn the filter back off.
+     */
+    private static final long FOREGROUND_GRACE_MS = 500;
 
-    private AudioManager mAudio;
-    private final Handler mHandler = new Handler(Looper.getMainLooper());
+    private boolean mFilterOn;
 
-    /** Key code currently ramping, or 0 when idle. */
-    private int mRampKeyCode;
-    private long mRampStartUptime;
+    private BroadcastReceiver mOursForeground;
 
-    private final Runnable mRampStep = new Runnable() {
-        @Override
-        public void run() {
-            if (mRampKeyCode == 0) {
-                return;
-            }
-            if (SystemClock.uptimeMillis() - mRampStartUptime > RAMP_MAX_MS) {
-                stopRamp();
-                return;
-            }
-            applyVolumeStep(mRampKeyCode);
-            mHandler.postDelayed(this, RAMP_INTERVAL_MS);
-        }
-    };
+    /** Uptime of the last ACTION_OURS_FOREGROUND, for {@link #FOREGROUND_GRACE_MS}. */
+    private long mOursForegroundAt;
+
+    /**
+     * The key is delivered down and up; only the initial down should toggle, or
+     * one press would open the panel and immediately close it again.
+     */
+    private boolean mGearDown;
 
     @Override
     protected void onServiceConnected() {
         super.onServiceConnected();
-        mAudio = (AudioManager) getSystemService(AUDIO_SERVICE);
-        // Service info comes from res/xml/key_service.xml, which already sets
-        // flagRequestFilterKeyEvents + canRequestFilterKeyEvents. Do not call
-        // setServiceInfo() here: it replaces the whole config, and passing a
-        // fresh AccessibilityServiceInfo silently drops the key-filter flag
-        // (that is exactly what disabled gear detection in build 5848d22).
-        Log.i(TAG, "connected: key filtering from XML, volume ramp owned by service");
-    }
-
-    @Override
-    public boolean onKeyEvent(KeyEvent event) {
-        final int keyCode = event.getKeyCode();
-        final int action = event.getAction();
-        final int scanCode = event.getScanCode();
-
-        if (DEBUG_KEYS && (scanCode == GEAR_SCANCODE
-                || keyCode == KeyEvent.KEYCODE_VOLUME_UP
-                || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN
-                || keyCode == KeyEvent.KEYCODE_VOLUME_MUTE)) {
-            Log.d(TAG, "key action=" + action + " code=" + keyCode
-                    + " scan=" + scanCode + " repeat=" + event.getRepeatCount()
-                    + " long=" + event.isLongPress());
-        }
-
-        // ---- gear button -------------------------------------------------
-        if (scanCode == GEAR_SCANCODE) {
-            if (action == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) {
-                openOrTogglePanel();
-            }
-            // Consume down and up so the MENU key never leaks to the app.
-            return true;
-        }
-
-        // ---- volume: own repeat engine -----------------------------------
-        switch (keyCode) {
-            case KeyEvent.KEYCODE_VOLUME_UP:
-            case KeyEvent.KEYCODE_VOLUME_DOWN:
-                if (action == KeyEvent.ACTION_DOWN) {
-                    if (event.getRepeatCount() == 0) {
-                        applyVolumeStep(keyCode);
-                        startRamp(keyCode);
-                    } else {
-                        // Defensive: if the platform ever delivers real repeats
-                        // (e.g. TV routing), let it drive and stop our timer so
-                        // the volume does not step twice.
-                        stopRamp();
-                        applyVolumeStep(keyCode);
-                    }
-                } else if (action == KeyEvent.ACTION_UP) {
-                    stopRamp();
+        if (mOursForeground == null) {
+            mOursForeground = new BroadcastReceiver() {
+                @Override
+                public void onReceive(Context context, Intent intent) {
+                    mOursForegroundAt = SystemClock.uptimeMillis();
+                    setFilter(true);
                 }
-                return true;
-
-            case KeyEvent.KEYCODE_VOLUME_MUTE:
-                if (action == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) {
-                    if (mAudio != null) {
-                        mAudio.adjustStreamVolume(AudioManager.STREAM_MUSIC,
-                                AudioManager.ADJUST_TOGGLE_MUTE,
-                                AudioManager.FLAG_SHOW_UI);
-                    }
-                }
-                return true;
-
-            default:
-                // Everything else (D-pad, back, media keys, ...) passes through
-                // untouched: single comparison on the hot path, no allocation.
-                return false;
-        }
-    }
-
-    /** Applies one volume step and shows the system volume bar. */
-    private void applyVolumeStep(int keyCode) {
-        if (mAudio == null) {
-            mAudio = (AudioManager) getSystemService(AUDIO_SERVICE);
-            if (mAudio == null) {
-                return;
+            };
+            IntentFilter filter = new IntentFilter(ACTION_OURS_FOREGROUND);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(mOursForeground, filter, Context.RECEIVER_EXPORTED);
+            } else {
+                registerReceiver(mOursForeground, filter);
             }
         }
-        final int direction = keyCode == KeyEvent.KEYCODE_VOLUME_UP
-                ? AudioManager.ADJUST_RAISE
-                : AudioManager.ADJUST_LOWER;
-        try {
-            mAudio.adjustStreamVolume(AudioManager.STREAM_MUSIC, direction,
-                    AudioManager.FLAG_SHOW_UI);
-        } catch (Exception e) {
-            Log.w(TAG, "cannot adjust volume", e);
-        }
-    }
-
-    private void startRamp(int keyCode) {
-        stopRamp();
-        mRampKeyCode = keyCode;
-        mRampStartUptime = SystemClock.uptimeMillis();
-        mHandler.postDelayed(mRampStep, RAMP_START_DELAY_MS);
-    }
-
-    private void stopRamp() {
-        mRampKeyCode = 0;
-        mHandler.removeCallbacks(mRampStep);
-    }
-
-    private void openOrTogglePanel() {
-        Intent i = new Intent(this, QuickPanelActivity.class);
-        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
-                | Intent.FLAG_ACTIVITY_SINGLE_TOP
-                | Intent.FLAG_ACTIVITY_CLEAR_TOP
-                | Intent.FLAG_ACTIVITY_NO_ANIMATION);
-        i.setAction(QuickPanelActivity.sVisible
-                ? QuickPanelActivity.ACTION_TOGGLE
-                : QuickPanelActivity.ACTION_OPEN);
-        try {
-            startActivity(i);
-        } catch (Exception e) {
-            Log.w(TAG, "cannot start panel", e);
-        }
-    }
-
-    @Override
-    public void onAccessibilityEvent(AccessibilityEvent event) {
-        // Only key filtering is used.
-    }
-
-    @Override
-    public void onInterrupt() {
-        stopRamp();
+        // The launcher is what starts the service in practice, so assume ours
+        // until a window-state event says otherwise.
+        setFilter(true);
     }
 
     @Override
     public void onDestroy() {
-        stopRamp();
+        if (mOursForeground != null) {
+            unregisterReceiver(mOursForeground);
+            mOursForeground = null;
+        }
         super.onDestroy();
+    }
+
+    @Override
+    public boolean onKeyEvent(KeyEvent event) {
+        if (event.getScanCode() != GEAR_SCANCODE) {
+            // Never consume anything else: volume, D-pad and media keys keep
+            // their native handling.
+            return false;
+        }
+
+        if (event.getAction() == KeyEvent.ACTION_DOWN) {
+            if (!mGearDown && event.getRepeatCount() == 0) {
+                mGearDown = true;
+                togglePanel();
+            }
+        } else {
+            mGearDown = false;
+        }
+        // Consume both edges so the key never reaches anything else.
+        return true;
+    }
+
+    @Override
+    public void onAccessibilityEvent(AccessibilityEvent event) {
+        if (event.getEventType() != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            return;
+        }
+        CharSequence pkg = event.getPackageName();
+        boolean ours = pkg != null
+                && (LAUNCHER_PACKAGE.contentEquals(pkg) || PANEL_PACKAGE.contentEquals(pkg));
+        if (!ours
+                && SystemClock.uptimeMillis() - mOursForegroundAt < FOREGROUND_GRACE_MS) {
+            return;
+        }
+        // Ours: claim the gear. Anything else: hand volume back to the platform.
+        setFilter(ours);
+    }
+
+    /**
+     * Toggles FLAG_REQUEST_FILTER_KEY_EVENTS without restarting the service, so
+     * the switch is instant and never needs a settings write.
+     */
+    private void setFilter(boolean on) {
+        if (on == mFilterOn) {
+            return;
+        }
+        AccessibilityServiceInfo info = getServiceInfo();
+        if (info == null) {
+            return;
+        }
+        if (on) {
+            info.flags |= AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS;
+        } else {
+            info.flags &= ~AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS;
+        }
+        setServiceInfo(info);
+        mFilterOn = on;
+        Log.i(TAG, "key filter " + (on ? "on" : "off"));
+    }
+
+    private void togglePanel() {
+        Intent i = new Intent(ACTION_TOGGLE_NOTIFICATION_PANEL)
+                .setComponent(PANEL)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_ANIMATION);
+        try {
+            startActivity(i);
+        } catch (Exception e) {
+            Log.w(TAG, "cannot toggle the panel", e);
+        }
+    }
+
+    @Override
+    public void onInterrupt() {
     }
 }

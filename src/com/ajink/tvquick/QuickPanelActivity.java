@@ -9,6 +9,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.text.format.DateFormat;
 import android.util.Log;
+import android.view.KeyEvent;
 import android.view.View;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
@@ -24,6 +25,14 @@ public class QuickPanelActivity extends Activity {
 
     public static final String ACTION_OPEN = "com.ajink.tvquick.action.OPEN";
     public static final String ACTION_TOGGLE = "com.ajink.tvquick.action.TOGGLE";
+
+    /**
+     * The intent SystemUI's TvNotificationPanel fires for the gear button
+     * (keycode 83). This activity declares it in the manifest, so SystemUI is what
+     * turns the physical key into a panel toggle.
+     */
+    private static final String ACTION_TOGGLE_NOTIFICATION_PANEL =
+            "android.app.action.TOGGLE_NOTIFICATION_HANDLER_PANEL";
 
     /** Read by KeyService to decide open vs. close. */
     static volatile boolean sVisible;
@@ -55,6 +64,9 @@ public class QuickPanelActivity extends Activity {
     private static final ComponentName ACCESSIBILITY =
             new ComponentName("com.android.tv.settings", "com.android.tv.settings.oemlink.AccessibilitySettingsActivity");
     private static final String TAG = "TvQuickPanel";
+
+    /** Scancode the RC600 gear button reports (KEY_BRL_DOT5). */
+    private static final int GEAR_SCANCODE = 501;
 
     private static final ComponentName SETTINGS =
             new ComponentName("com.android.tv.settings", "com.android.tv.settings.MainSettings");
@@ -99,9 +111,9 @@ public class QuickPanelActivity extends Activity {
 
         findViewById(R.id.tile_inputs).requestFocus();
 
-        // The bridge has to be alive before the gear can be used, and the panel
-        // is the only thing that starts it on a fresh install.
-        GearBridgeService.start(this);
+        // The gear key reaches this activity as a normal key event (the adb
+        // bridge and the accessibility filter are both retired - see
+        // docs/bugs/volume-long-press.md), so nothing has to be started here.
     }
 
     private void bind(int id, final ComponentName target, final String fallbackAction) {
@@ -252,12 +264,34 @@ public class QuickPanelActivity extends Activity {
     }
 
     @Override
+    public boolean onKeyDown(int keyCode, KeyEvent event) {
+        // Fallback only: on this TV SystemUI intercepts the gear keycode before
+        // any activity sees it, so the panel is toggled through onNewIntent
+        // below. If a build stops intercepting, this keeps the key working.
+        if (event.getScanCode() == GEAR_SCANCODE
+                || keyCode == KeyEvent.KEYCODE_NOTIFICATION) {
+            if (event.getRepeatCount() == 0) {
+                finish();
+            }
+            return true;
+        }
+        return super.onKeyDown(keyCode, event);
+    }
+
+    @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
-        if (intent != null && ACTION_TOGGLE.equals(intent.getAction())) {
+        String action = intent == null ? null : intent.getAction();
+        // Re-entry only happens when this activity is already at the top of its
+        // task, so both actions mean "close it". Do not consult a visibility
+        // flag: the panel is paused for a moment around the hand-off and would
+        // latch the wrong state.
+        if (ACTION_TOGGLE.equals(action)
+                || ACTION_TOGGLE_NOTIFICATION_PANEL.equals(action)) {
             finish();
             return;
         }
+        setIntent(intent);
         updateClock();
     }
 
@@ -265,6 +299,10 @@ public class QuickPanelActivity extends Activity {
     protected void onResume() {
         super.onResume();
         sVisible = true;
+        // Coming back to this window (e.g. from a tile's settings page) raises no
+        // window-state event, so tell KeyService the gear filter belongs on.
+        sendBroadcast(new Intent(KeyService.ACTION_OURS_FOREGROUND)
+                .setPackage(getPackageName()));
         applyImmersive();
         updateClock();
         mHandler.removeCallbacks(mTick);

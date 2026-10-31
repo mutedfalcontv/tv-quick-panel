@@ -1,6 +1,7 @@
 # Bug: volume long-press does not repeat (single press only)
 
-**Status:** root cause confirmed on device; fix path is now key: **no accessibility service may request key filtering**
+**Status:** fixed on device with a scoped filter (2026-10-31); one documented
+trade-off remains on the home screen
 **Reported:** 2026-10-29
 **Device:** MOKA R4G, Android 14 (SDK 34), RC600 remote
 **Area:** remote input / accessibility key filtering
@@ -45,14 +46,15 @@ the whole input pipeline works.
    }
    ```
 
-   * policy returns `-1` (TV routing): event swallowed, volume already adjusted
-     by `PhoneWindowManager.dispatchDirectAudioEvent()`.
-   * policy returns `0` (no TV routing): event is forwarded to accessibility
-     services, and if none handles it the platform **re-injects** it into
-     `InputDispatcher`.
+   On this TV the policy consumes the key (TV audio routing) and steps the
+   stream itself. The event is swallowed inside the interceptor and never
+   reaches `InputDispatcher`, never reaches any accessibility service, and never
+   creates a `KeyEntry`.
 
-3. Re-injection loses the native repeat chain. `InputDispatcher::notifyKey()`
-   hardcodes the repeat count:
+3. Repeats are generated per `KeyEntry` in `dispatchKeyLocked()`, so no
+   `KeyEntry` means no repeats. `InputDispatcher::notifyKey()` also hardcodes
+   `repeatCount = 0` for anything that enters it, so even the re-injection path
+   cannot restore a hold:
 
    ```cpp
    // InputDispatcher tracks and generates key repeats on behalf of
@@ -60,10 +62,7 @@ the whole input pipeline works.
    constexpr int32_t repeatCount = 0;
    ```
 
-   Repeats are generated per `KeyEntry` inside `dispatchKeyLocked()`. A key
-   swallowed by the input filter never creates that `KeyEntry`, so the
-   re-injected copy is just a fresh press. Result: one step per physical press,
-   no ramp.
+   Result: one step per physical press, no ramp.
 
 4. `interceptKeyResult` is cached per `KeyEntry` (`InputDispatcher.cpp`), so the
    filter/policy is consulted once per press and repeats normally bypass it.
@@ -76,86 +75,94 @@ fresh `AccessibilityServiceInfo` silently dropped
 `FLAG_REQUEST_FILTER_KEY_EVENTS` and disabled gear detection
 (build `5848d22`).
 
-## Why tvQuickActions does not have this problem
+## Attempts that were measured and did not work
 
-`tvQuickActions` 3.5.3 uses exactly the same mechanism
-(`flagRequestFilterKeyEvents` in its accessibility XML) and does **not** special
-case volume anywhere in its code. Its only advantage is that its remap engine
-consumes the keys it acts on, so those keys never take the re-injection path.
-For unremapped volume keys it is in the same position as this app.
+All of these were run on the TV on 2026-10-31, not reasoned about:
 
-See `docs/analysis/tvquickactions-key-interception.md` for the full decompile
-analysis.
+| Attempt | Result |
+| --- | --- |
+| Filter on, pass every key through (`return false`) | volume still steps once |
+| Filter on, own the ramp with `AudioManager` | never runs: volume keys are consumed before accessibility sees them |
+| Watch `android.media.VOLUME_CHANGED_ACTION`, drop the filter for 4 s after the first step | ramp still does not resume - the held key has no `KeyEntry`, and the RC600 sends press/release only (repeats are OS-generated) |
+| Disable the vendor `com.realtek.keyinterceptserver` | no change; the framework policy is the consumer |
+| Declare `TOGGLE_NOTIFICATION_HANDLER_PANEL` and hope SystemUI routes the gear to us | SystemUI resolves with `MATCH_SYSTEM_ONLY`; a normally installed app can never match |
+| Inject the key from the service | `INPUT_INJECTION` is a system permission |
 
-## Fix implemented (KeyService)
+Conclusion: with a normal app on this TV, the gear button and the native volume
+ramp cannot both be owned at the same instant.
 
-Take the volume keys over instead of letting them fall through the filter:
+## Fix implemented: scope the filter to our own foreground apps (KeyService)
 
-* `VOLUME_UP` / `VOLUME_DOWN` `ACTION_DOWN` (`repeatCount == 0`): one
-  `AudioManager.adjustStreamVolume(STREAM_MUSIC, ...)` step with
-  `FLAG_SHOW_UI`, then a self-scheduled ramp every 120 ms until `ACTION_UP`
-  (first repeat after 400 ms, hard stop after 8 s).
-* `VOLUME_MUTE`: toggle once.
-* The events are consumed (`return true`), so the platform never re-injects them
-  and the ramp no longer depends on framework repeat delivery.
-* If the platform ever does deliver real repeats (`repeatCount > 0`, TV-routing
-  devices), the local ramp is cancelled so the volume cannot step twice.
-* Everything else still returns `false` from a single integer comparison.
+The filter only has to be on while the gear is the useful key - on the launcher
+and on the panel. Anywhere else, volume matters more and the gear does nothing.
 
-Service config stays in `res/xml/key_service.xml`; `onServiceConnected()` no
-longer calls `setServiceInfo()`.
+* `KeyService` receives `TYPE_WINDOW_STATE_CHANGED`, checks the foreground
+  package, and toggles `FLAG_REQUEST_FILTER_KEY_EVENTS` on its own
+  `AccessibilityServiceInfo` through `setServiceInfo()`:
+  * `com.ajink.tvglass` (launcher) or `com.ajink.tvquick` (panel) -> filter on,
+  * anything else -> filter off.
+* Window events are not enough on their own: `TYPE_WINDOW_STATE_CHANGED` fires
+  when a window is added, not when an existing window is brought back to the
+  front. Returning to the launcher, or to a panel that was covered by a settings
+  page, produces no event - measured on the TV. Both activities therefore
+  broadcast `com.ajink.tvquick.action.OURS_FOREGROUND` from `onResume`, and
+  `KeyService` turns the filter on from that broadcast.
+* The window that was just covered tears down a moment later and emits its own
+  state change (measured: 140 ms after the resume). Events from other packages
+  during the 500 ms after an `OURS_FOREGROUND` broadcast are that tail, not a
+  real app switch, and are ignored.
+* Toggling the flag at runtime is instant and needs no settings write and no
+  service restart. The service itself stays enabled, so no reboot-time
+  re-approval is needed.
+* While the filter is on, `onKeyEvent` consumes only the gear (scancode 501 /
+  `KEYCODE_NOTIFICATION`); everything else returns `false` untouched.
+* The panel is toggled with the same action SystemUI would use,
+  `android.app.action.TOGGLE_NOTIFICATION_HANDLER_PANEL`, on an explicit
+  component. `onNewIntent` finishes the single-top instance, so the same button
+  opens and closes it.
+* The ADB/`getevent` bridge (`GearBridgeService`) is retired: adbd on this build
+  re-prompts for USB debugging after every reconnect, which a remote-only TV
+  cannot tolerate. See `docs/analysis/adb-gear-bridge.md`.
 
-## Diagnostics
+## Measured on the TV (2026-10-31)
 
-`DEBUG_KEYS = true` in `KeyService` logs volume and gear keys only (D-pad stays
-off the hot path):
+| Configuration | Gear button | Volume held |
+| --- | --- | --- |
+| Filter off (third-party app foreground) | does nothing | ramps natively (measured 52 -> 100 on one hold) |
+| Filter on (launcher/panel foreground) | opens and closes the panel | one step per press |
+
+`adb shell dumpsys input | grep InputFilter` follows the foreground package.
+Verified end to end on the TV by driving the activities over ADB:
+
+| Foreground | `InputFilterEnabled` |
+| --- | --- |
+| launcher | `true` |
+| Settings | `false` |
+| launcher (returned) | `true` |
+| panel | `true` |
+| Settings opened from the panel | `false` |
+| panel (returned) | `true` |
+
+## Remaining trade-off
+
+On the home screen the filter must be on for the gear to work, so holding volume
+there still gives a single step. Any app (including the panel's own targets)
+restores the native ramp. There is no app-side way around this - it is the price
+of intercepting a key on a build where the policy owns volume.
+
+## Diagnosis recipe
+
+`adb shell dumpsys input | grep InputFilter` shows the current state, and the
+service logs every transition:
 
 ```sh
-adb logcat -c && adb logcat -s TvQuickKey:D
-# press VOL+ once, then hold VOL+ for two seconds
+adb logcat -s TvQuickKey:I
+# key filter on        <- launcher or panel came forward
+# key filter off       <- another app came forward
 ```
 
-Expected when the fix is active:
+## References
 
-```
-key action=0 code=24 scan=114 repeat=0 long=false   <- press, one step
-key action=1 code=24 scan=114 repeat=0 long=false   <- release, ramp stops
-```
-
-If the volume key lines never appear, the device uses TV routing: the policy
-consumes the keys inside the interceptor and the service is not involved at all.
-
-## On-device confirmation of the fix (2026-10-30)
-
-* `adb shell dumpsys input | grep InputFilter`:
-  * no accessibility services enabled -> `InputFilterEnabled: false`
-  * Projectivy only -> `true`  <- also kills volume long-press
-  * tv-quick-panel only -> `true`
-* The tv-quick-panel accessibility service therefore has to stay **off**.
-  The gear button is now watched over ADB instead (`docs/analysis/adb-gear-bridge.md`).
-
-## Remaining acceptance criterion
-
-With the accessibility services off, holding `VOL +` / `VOL -` must ramp the
-stream volume continuously. The input-filter precondition for that ramp is
-verified on the device; a physical hold still needs to be done on the TV.
-
-## Update 2026-10-30 (ADB path)
-
-The volume ramp itself never runs inside `KeyService` on this TV (the policy
-eats volume keys before they reach any accessibility service), so the ramp can
-only come back by dropping the key filter entirely.
-
-Action taken on the TV:
-
-```sh
-adb shell settings put secure enabled_accessibility_services ""
-```
-
-`dumpsys input` now reports `InputFilterEnabled: false`, which is the state the
-platform needs for the native long-press ramp to be generated.
-
-The gear button is handled by the ADB bridge
-(`com.ajink.tvquick.GearBridgeService` + `com.ajink.tvquick.adb.*`), which reads
-raw events through `getevent` on the device's adbd. See
-`docs/analysis/adb-gear-bridge.md`.
+* `docs/analysis/tvquickactions-key-interception.md` - what the shipping
+  remapper does (same mechanism, same volume limitation).
+* `docs/analysis/adb-gear-bridge.md` - the retired `getevent` alternative.

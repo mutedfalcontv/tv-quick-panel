@@ -70,6 +70,8 @@ public class GearBridgeService extends Service {
     private static final int GEAR_SCANCODE = 501;
     /** EV_KEY */
     private static final String EV_KEY = "0001";
+    /** Set to true to log every getevent line (very noisy, debugging only). */
+    private static final boolean DEBUG_LINES = false;
 
     /** Debounce for the gear, in case getevent repeats the down event. */
     private static final long GEAR_DEBOUNCE_MS = 250;
@@ -84,6 +86,8 @@ public class GearBridgeService extends Service {
     private volatile AdbConnection mConnection;
     private volatile boolean mRetryNow;
     private long mLastGearAt;
+    /** True while the gear is physically held, so only a fresh press toggles. */
+    private boolean mGearDown;
     private String mState = "starting";
 
     public static void start(android.content.Context context) {
@@ -264,7 +268,7 @@ public class GearBridgeService extends Service {
      * {@code /dev/input/event4: 0001 01f5 00000001} (type, code, value in hex).
      */
     private void handleLine(CharSequence raw) {
-        if (Log.isLoggable(TAG, Log.DEBUG)) {
+        if (DEBUG_LINES) {
             Log.d(TAG, "ev: " + raw);
         }
         int colon = -1;
@@ -289,13 +293,23 @@ public class GearBridgeService extends Service {
         } catch (NumberFormatException e) {
             return;
         }
-        if (code != GEAR_SCANCODE || value != 1) {
+        if (code != GEAR_SCANCODE) {
+            return;
+        }
+        if (value == 0) {
+            // Release: re-arm the latch.
+            mGearDown = false;
+            return;
+        }
+        if (value != 1 || mGearDown) {
+            // Repeat of a held key, or a value we do not care about.
             return;
         }
         long now = SystemClock.elapsedRealtime();
         if (now - mLastGearAt < GEAR_DEBOUNCE_MS) {
             return;
         }
+        mGearDown = true;
         mLastGearAt = now;
         Log.i(TAG, "gear pressed");
         togglePanel();

@@ -1,8 +1,22 @@
 # Analysis: the gear button without an accessibility key filter
 
-**Status:** implemented (`GearBridgeService`), pending final on-device confirmation
+**Status:** retired (2026-10-31). `GearBridgeService` is kept in the source tree
+as the documented alternative but is not declared in the manifest.
 **Device:** MOKA R4G, Android 14 (SDK 34), RC600 remote
 **Related:** `docs/bugs/volume-long-press.md`
+
+## Why it is retired
+
+The bridge worked on a live connection, but its ADB key was never persisted:
+adbd logs `Invalid base64 key` while loading `/data/misc/adb/adb_keys`, so the
+key is not stored and *"Allow USB debugging?"* comes back after every reconnect
+(force-stop, reboot, backoff). The TV is used entirely from the remote, so a
+dialog that needs a manual tap cannot be part of normal operation.
+
+The shipped solution is the other direction: the accessibility key filter is kept
+but scoped to the launcher and the panel, so volume keeps its native ramp
+everywhere else. See the fix section of `docs/bugs/volume-long-press.md`. The
+rest of this document is kept as the analysis of the `getevent` route.
 
 ## The constraint
 
@@ -61,9 +75,10 @@ See `docs/analysis/tvquickactions-key-interception.md`. In short:
 * in that mode it runs `getevent`, parses the raw `0001 <code> <value>` lines and
   re-injects keys with `input keyevent`.
 
-So "ADB remap" is exactly the escape hatch this device needs.
+So "ADB remap" looked like the escape hatch this device needed. It was built and
+worked while connected, then retired for the key-persistence reason above.
 
-## Implementation
+## Implementation (retired)
 
 `com.ajink.tvquick.GearBridgeService` (foreground service, `specialUse`) plus
 `com.ajink.tvquick.adb.AdbConnection` and `com.ajink.tvquick.adb.AdbKey`.
@@ -124,21 +139,18 @@ same intent both opens and closes.
   (`mRetryNow`), and `START_STICKY` + a `BOOT_COMPLETED` receiver keep the
   service alive.
 
-## Setup (one time)
+## Setup that was required (and why it disqualified the bridge)
 
 1. ADB over network must be on: `service.adb.tcp.port=5555` (it is).
 2. Open the panel once. The TV shows *"Allow USB debugging?"* for
    `tvquick@tv`.
-3. Accept it. The key is written to `/data/misc/adb/adb_keys` and the dialog does
-   not come back.
-4. Disable every accessibility service that requests key filtering
-   (including Projectivy's) - otherwise the volume ramp stays broken:
+3. Accept it. In theory the key is written to `/data/misc/adb/adb_keys` and the
+   dialog does not come back. In practice adbd rejected the key
+   (`Invalid base64 key`), so step 3 had to be repeated after every reconnect.
+4. Every accessibility service that requests key filtering had to stay off,
+   which is what made the gear impossible without ADB in the first place.
 
-   ```sh
-   adb shell settings put secure enabled_accessibility_services ""
-   ```
-
-## Verification
+## Verification (historical)
 
 ```sh
 adb logcat -s TvGearBridge:D
@@ -149,6 +161,6 @@ adb logcat -s TvGearBridge:D
 #         gear pressed
 ```
 
-Volume acceptance criteria live in `docs/bugs/volume-long-press.md`: with the
-accessibility services off, `dumpsys input` reports
-`InputFilterEnabled: false` and the platform ramps volume natively on long-press.
+The shipped acceptance criteria live in `docs/bugs/volume-long-press.md`: the
+filter follows the foreground package, so volume ramps natively in any app and
+the gear works on the launcher and the panel.
