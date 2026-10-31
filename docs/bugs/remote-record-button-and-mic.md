@@ -18,8 +18,9 @@ in the bridge (2026-10-31), waiting on a physical press to confirm the scancode
 
 | Check | Result |
 | --- | --- |
-| RC600 Bluetooth profiles | `HID_HOST=100`; `A2DP`, `HEADSET`, `LE_AUDIO` all `-1` - the remote is paired as a **HID device only**, so it has no audio path |
+| RC600 Bluetooth profile policy | `HID_HOST=100`; `A2DP`, `HEADSET`, `LE_AUDIO`, `HEADSET_CLIENT` all `-1`; the device is bonded as `[ LE ]` (HOGP HID), so it has no audio path |
 | TV audio inputs | `Built-In Mic` (`AUDIO_DEVICE_IN_BUILTIN_MIC`, `@:bottom`) exists in `dumpsys media.audio_policy` |
+| Assistant recording | active `VOICE_RECOGNITION` client, `AudioRecord` routed to `AUDIO_DEVICE_IN_BUILTIN_MIC`, 2ch 16 kHz, pack `com.google.android.katniss`; `mScoAudioState=INACTIVE` (no Bluetooth mic involved) |
 | Assistant package | `com.google.android.katniss` 7.55.87, `enabled=1` |
 | `voice_interaction_service` | `com.google.android.katniss/.search.serviceapi.KatnissVoiceInteractionService` |
 | `android.intent.action.ASSIST` | resolves to `com.google.android.katniss/...launch.trampoline.SearchActivityTrampoline` |
@@ -35,12 +36,16 @@ running; see below).
 
 Two independent problems:
 
-1. **The remote's mic cannot work on this stack.** The RC600 is connected as a
-   HID keyboard-ish device only. Android TV remotes with a mic normally stream
-   audio through a proprietary/HOGP voice channel or HFP; neither is enabled
-   here, and the audio policy has no input device for it. The phone remote app
-   works because `com.google.android.tv.remote.service` carries audio from the
-   phone over Wi-Fi - it does not use the remote's microphone either.
+1. **The remote's mic cannot work on this stack.** The RC600 is bonded as a BLE
+   HOGP HID device (`[ LE ]`, `HID_HOST=100`, every audio profile unset). Android
+   TV remotes with a mic normally stream audio through a vendor GATT voice
+   channel or HFP; neither is connected here, and no input device exists for the
+   remote. The phone remote app works because
+   `com.google.android.tv.remote.service` carries audio from the phone over Wi-Fi
+   - it does not use the remote's microphone either.
+   The TV's own bottom mic *is* used by the Assistant (measured while it was
+   listening), so voice input from the TV body is the available path; only the
+   physical remote's microphone is out of reach.
 2. **The record button is not wired to the Assistant.** Whatever keycode the
    button sends, nothing on the system treats it as the assist action. The
    Assistant itself is fine: it starts and listens when its searchbar activity is
@@ -101,15 +106,16 @@ python tools/decode-remote-events.py record.bin
 adb logcat -s TvGearBridge:I     # expect: assist key 167 (or 217)
 ```
 
-Still to verify by speaking: whether the Assistant uses the TV's built-in mic and
-how it behaves with the on-screen volume OSD.
+Still to verify by speaking: whether the built-in mic actually picks up sound
+(the AudioRecord path is confirmed, the transducer is not).
 
 ## Open questions
 
-* Does the Assistant use the built-in mic when launched this way? Check
-  `dumpsys media.audio_policy` / `dumpsys audio` while it is listening, or simply
-  speak into the TV.
 * Is the record button expected to send `KEY_RECORD` (167), `KEY_VOICECOMMAND`
   (217) or a vendor code? The capture will settle it.
-* Does the phone app's voice path also work through the TV's built-in mic, or is
-  the audio entirely from the phone? (Almost certainly the latter.)
+* Is the built-in mic working acoustically? `RecordActivityMonitor` shows katniss
+  recording from it; if speech is not recognised, the next checks are the TV's
+  mic mute switch/`mute` state and whether the transducer is present at all.
+* Could the RC600's mic be exposed at all? Only if the remote advertises a vendor
+  GATT voice service or HFP; the current bond shows HOGP HID only, so there is
+  nothing for Android to connect to.
