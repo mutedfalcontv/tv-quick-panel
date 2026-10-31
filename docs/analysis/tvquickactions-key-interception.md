@@ -132,11 +132,11 @@ They do not take over volume and they do not compensate for lost repeats.
   * `typeAllMask` event types + `canRetrieveWindowContent` +
     `canTakeScreenshot`: they need window content for their own UI; this project
     only needs key filtering, so the narrower config is cheaper.
-* What this project adds beyond their design: the filter is scoped to the
-  launcher and the panel instead of being permanently on, so volume keeps its
-  native ramp in every other app. Their design has the identical volume
-  limitation (their own strings tell the user to wait 10 s with the service
-  disabled).
+* What this project does differently: no accessibility service at all. The gear
+  is read from `getevent` over the device's own adbd, so the input pipeline is
+  untouched and volume long-press keeps its native ramp in every app. Their
+  accessibility path has the same volume limitation (their own strings tell the
+  user to wait 10 s with the service disabled).
 
 ## Reproduction commands
 
@@ -150,13 +150,11 @@ sources/dev/vodik7/tvquickactions/KeyAccessibilityService.java   # onKeyEvent
 sources/o5/h.java                                               # key code tables
 res/xml/accessibility_service_config.xml                        # service config
 ```
-## ADB mode (getevent) — historical
+## ADB mode (getevent) — what this project uses
 
 tvQuickActions also ships an **ADB-based remap path** that works **without** the
-accessibility service (see AdbLibService in the decompile). It informed
-`GearBridgeService`, which was built and then retired (the TV's adbd would not
-persist the app's key, so it re-prompted on every reconnect). The shipped design
-goes the other way: a scoped accessibility filter. Details:
+accessibility service (see AdbLibService in the decompile). `GearBridgeService`
+is modelled on it and is now the shipped path for the gear button. Details:
 
 - AdbLibService opens a localhost connection to adbd (127.0.0.1:5555) using
   an app-owned RSA key (stored in the app's private storage, persisted in

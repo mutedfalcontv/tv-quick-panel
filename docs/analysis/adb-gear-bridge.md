@@ -1,22 +1,23 @@
 # Analysis: the gear button without an accessibility key filter
 
-**Status:** retired (2026-10-31). `GearBridgeService` is kept in the source tree
-as the documented alternative but is not declared in the manifest.
+**Status:** shipped (2026-10-31). `GearBridgeService` is the only way the gear
+reaches the panel; there is no accessibility service any more.
 **Device:** MOKA R4G, Android 14 (SDK 34), RC600 remote
 **Related:** `docs/bugs/volume-long-press.md`
 
-## Why it is retired
+## What made the first version re-prompt
 
-The bridge worked on a live connection, but its ADB key was never persisted:
-adbd logs `Invalid base64 key` while loading `/data/misc/adb/adb_keys`, so the
-key is not stored and *"Allow USB debugging?"* comes back after every reconnect
-(force-stop, reboot, backoff). The TV is used entirely from the remote, so a
-dialog that needs a manual tap cannot be part of normal operation.
+The first bridge generated its own RSA key and sent it as
+`... tvquick@tv`. adbd matches an `adb_keys` line as a whole: the same key
+material under a different name is a different entry, so every reconnect showed
+*"Allow USB debugging?"* again. (The device also carries one malformed entry in
+`adb_keys`, which adbd logs as `Invalid base64 key` and ignores.)
 
-The shipped solution is the other direction: the accessibility key filter is kept
-but scoped to the launcher and the panel, so volume keeps its native ramp
-everywhere else. See the fix section of `docs/bugs/volume-long-press.md`. The
-rest of this document is kept as the analysis of the `getevent` route.
+The shipped version reuses the key the PC already authorized. The private key and
+`adbkey.pub` are pushed once into the app's external files dir, the app sends the
+exact same key line (material *and* name), and the framework auto-approves a key
+it stored with "always allow" - no dialog, no manual tap. Measured: connect to
+`getevent` in ~3 s with no UI.
 
 ## The constraint
 
@@ -134,33 +135,44 @@ same intent both opens and closes.
 ### Reconnect policy
 
 * Socket/stream error: backoff 2 s -> 30 s.
-* Authorization rejected/pending: 60 s -> 2 min -> 4 min -> 5 min, because every
-  attempt raises a new dialog on screen. Opening the panel retries immediately
-  (`mRetryNow`), and `START_STICKY` + a `BOOT_COMPLETED` receiver keep the
-  service alive.
+* Authorization rejected/pending: 60 s -> 2 min -> 4 min -> 5 min, so a key the
+  TV no longer knows cannot hammer the authorization path. Opening the panel
+  retries immediately (`mRetryNow`), and `START_STICKY` + a `BOOT_COMPLETED`
+  receiver keep the service alive.
 
-## Setup that was required (and why it disqualified the bridge)
+## Setup (one time)
 
 1. ADB over network must be on: `service.adb.tcp.port=5555` (it is).
-2. Open the panel once. The TV shows *"Allow USB debugging?"* for
-   `tvquick@tv`.
-3. Accept it. In theory the key is written to `/data/misc/adb/adb_keys` and the
-   dialog does not come back. In practice adbd rejected the key
-   (`Invalid base64 key`), so step 3 had to be repeated after every reconnect.
-4. Every accessibility service that requests key filtering had to stay off,
-   which is what made the gear impossible without ADB in the first place.
+2. Push the PC's already-authorized key, both halves:
 
-## Verification (historical)
+   ```sh
+   adb shell mkdir -p /sdcard/Android/data/com.ajink.tvquick/files
+   adb push ~/.android/adbkey     /sdcard/Android/data/com.ajink.tvquick/files/adbkey
+   adb push ~/.android/adbkey.pub /sdcard/Android/data/com.ajink.tvquick/files/adbkey.pub
+   ```
+
+   The `.pub` file supplies the name; adbd matches the whole key line.
+3. Open the panel once (or reboot). It starts `GearBridgeService`, which keeps
+   the adb connection alive and restarts it after a reconnect or reboot.
+4. Disable every accessibility service that requests key filtering - that is what
+   keeps volume long-press native:
+
+   ```sh
+   adb shell settings delete secure enabled_accessibility_services
+   ```
+
+## Verification
 
 ```sh
-adb logcat -s TvGearBridge:D
+adb logcat -s TvGearBridge:I
 # expect: connecting to adb 127.0.0.1:5555 / adb connected, opening getevent /
 #         getevent running
 # then press the gear:
-#         ev: /dev/input/event4: 0001 01f5 00000001
 #         gear pressed
+
+adb shell dumpsys input | grep InputFilter   # false, always
 ```
 
-The shipped acceptance criteria live in `docs/bugs/volume-long-press.md`: the
-filter follows the foreground package, so volume ramps natively in any app and
-the gear works on the launcher and the panel.
+The acceptance criteria live in `docs/bugs/volume-long-press.md`: the gear works
+in every app and the platform ramps volume natively, because nothing in the input
+path is intercepted.

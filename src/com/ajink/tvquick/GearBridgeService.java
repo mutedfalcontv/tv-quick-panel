@@ -47,8 +47,15 @@ import java.security.PrivateKey;
  * background-activity-launch exemption.
  *
  * <h3>Setup (one time)</h3>
- * The first connection makes the TV show "Allow USB debugging?" for this app's
- * key. Accept it once; the key then stays in {@code /data/misc/adb/adb_keys}.
+ * The app authenticates as an ADB host. Push the PC's already-authorized key
+ * once, so no "Allow USB debugging?" dialog is ever needed (this firmware does
+ * not reliably persist a newly accepted key):
+ *
+ * <pre>
+ * adb push ~/.android/adbkey \
+ *     /sdcard/Android/data/com.ajink.tvquick/files/adbkey
+ * </pre>
+ *
  * ADB over the network must stay enabled (it is on this device,
  * {@code service.adb.tcp.port=5555}).
  */

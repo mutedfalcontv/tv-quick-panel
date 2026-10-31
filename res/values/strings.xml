@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Quick Panel</string>
-    <string name="service_label">Quick Panel key</string>
     <string name="tile_inputs">Inputs</string>
     <string name="tile_display">Display</string>
     <string name="tile_sound">Sound</string>

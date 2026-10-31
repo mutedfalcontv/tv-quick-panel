@@ -1,7 +1,7 @@
 # Bug: volume long-press does not repeat (single press only)
 
-**Status:** fixed on device with a scoped filter (2026-10-31); one documented
-trade-off remains on the home screen
+**Status:** fixed on device (2026-10-31). The gear is read over adbd, so the gear
+button and the native volume long-press ramp both work in every app.
 **Reported:** 2026-10-29
 **Device:** MOKA R4G, Android 14 (SDK 34), RC600 remote
 **Area:** remote input / accessibility key filtering
@@ -91,74 +91,62 @@ All of these were run on the TV on 2026-10-31, not reasoned about:
 Conclusion: with a normal app on this TV, the gear button and the native volume
 ramp cannot both be owned at the same instant.
 
-## Fix implemented: scope the filter to our own foreground apps (KeyService)
+## Fix implemented: read the gear over adbd (GearBridgeService)
 
-The filter only has to be on while the gear is the useful key - on the launcher
-and on the panel. Anywhere else, volume matters more and the gear does nothing.
+The gear is not intercepted in the input pipeline at all. `GearBridgeService`
+connects to the device's own adbd on `127.0.0.1:5555`, runs `getevent`, and
+looks for scancode 501 (`EV_KEY`, code `0x01f5`). Nothing in the key path
+changes, so the native volume long-press ramp works in every app, and the gear
+works in every app too.
 
-* `KeyService` receives `TYPE_WINDOW_STATE_CHANGED`, checks the foreground
-  package, and toggles `FLAG_REQUEST_FILTER_KEY_EVENTS` on its own
-  `AccessibilityServiceInfo` through `setServiceInfo()`:
-  * `com.ajink.tvglass` (launcher) or `com.ajink.tvquick` (panel) -> filter on,
-  * anything else -> filter off.
-* Window events are not enough on their own: `TYPE_WINDOW_STATE_CHANGED` fires
-  when a window is added, not when an existing window is brought back to the
-  front. Returning to the launcher, or to a panel that was covered by a settings
-  page, produces no event - measured on the TV. Both activities therefore
-  broadcast `com.ajink.tvquick.action.OURS_FOREGROUND` from `onResume`, and
-  `KeyService` turns the filter on from that broadcast.
-* The window that was just covered tears down a moment later and emits its own
-  state change (measured: 140 ms after the resume). Events from other packages
-  during the 500 ms after an `OURS_FOREGROUND` broadcast are that tail, not a
-  real app switch, and are ignored.
-* Toggling the flag at runtime is instant and needs no settings write and no
-  service restart. The service itself stays enabled, so no reboot-time
-  re-approval is needed.
-* While the filter is on, `onKeyEvent` consumes only the gear (scancode 501 /
-  `KEYCODE_NOTIFICATION`); everything else returns `false` untouched.
-* The panel is toggled with the same action SystemUI would use,
-  `android.app.action.TOGGLE_NOTIFICATION_HANDLER_PANEL`, on an explicit
-  component. `onNewIntent` finishes the single-top instance, so the same button
-  opens and closes it.
-* The ADB/`getevent` bridge (`GearBridgeService`) is retired: adbd on this build
-  re-prompts for USB debugging after every reconnect, which a remote-only TV
-  cannot tolerate. See `docs/analysis/adb-gear-bridge.md`.
+* Opening/closing the panel is done with
+  `am start -a com.ajink.tvquick.action.TOGGLE -n com.ajink.tvquick/.QuickPanelActivity`
+  on the same adb stream, because a foreground service may not start activities
+  from the background. `onNewIntent` finishes the single-top instance, so one
+  press opens and the next closes.
+* No accessibility service is declared or enabled, so
+  `InputFilterEnabled` is `false` in every app.
+* The bridge authenticates as an ADB host. Push the PC's already-authorized key
+  once (both files), so the TV never has to show a debugging dialog:
+
+  ```sh
+  adb shell mkdir -p /sdcard/Android/data/com.ajink.tvquick/files
+  adb push ~/.android/adbkey     /sdcard/Android/data/com.ajink.tvquick/files/adbkey
+  adb push ~/.android/adbkey.pub /sdcard/Android/data/com.ajink.tvquick/files/adbkey.pub
+  ```
+
+  The `.pub` file matters: adbd treats the same key material under a different
+  name as a different `adb_keys` entry (measured - this is what kept making the
+  dialog reappear).
+* adbd still asks the framework on first connect, and the framework
+  auto-approves a key it stored with "always allow" (auth window is 7 days and
+  refreshes on use), so no dialog appears. Measured: connect to `getevent` in
+  ~3 s with no UI.
+* `BootReceiver` restarts the bridge after a reboot. The service is a
+  `specialUse` foreground service with a minimal, silent notification.
 
 ## Measured on the TV (2026-10-31)
 
-| Configuration | Gear button | Volume held |
-| --- | --- | --- |
-| Filter off (third-party app foreground) | does nothing | ramps natively (measured 52 -> 100 on one hold) |
-| Filter on (launcher/panel foreground) | opens and closes the panel | one step per press |
+| Design | Gear | Volume held | Accessibility filter |
+| --- | --- | --- | --- |
+| Filter always on | every app | one step everywhere | on |
+| Filter scoped to our apps | launcher/panel only | native elsewhere | follows foreground |
+| **ADB bridge (shipped)** | **every app** | **native everywhere** | **off** |
 
-`adb shell dumpsys input | grep InputFilter` follows the foreground package.
-Verified end to end on the TV by driving the activities over ADB:
-
-| Foreground | `InputFilterEnabled` |
-| --- | --- |
-| launcher | `true` |
-| Settings | `false` |
-| launcher (returned) | `true` |
-| panel | `true` |
-| Settings opened from the panel | `false` |
-| panel (returned) | `true` |
-
-## Remaining trade-off
-
-On the home screen the filter must be on for the gear to work, so holding volume
-there still gives a single step. Any app (including the panel's own targets)
-restores the native ramp. There is no app-side way around this - it is the price
-of intercepting a key on a build where the policy owns volume.
+`dumpsys input | grep InputFilter` is `false` in every app with the service
+disabled, and `logcat -s TvGearBridge:I` shows `adb connected` /
+`getevent running`.
 
 ## Diagnosis recipe
 
-`adb shell dumpsys input | grep InputFilter` shows the current state, and the
-service logs every transition:
-
 ```sh
-adb logcat -s TvQuickKey:I
-# key filter on        <- launcher or panel came forward
-# key filter off       <- another app came forward
+adb logcat -s TvGearBridge:I
+# connecting to adb 127.0.0.1:5555
+# adb connected, opening getevent
+# getevent running
+# gear pressed                      <- on the physical button
+
+adb shell dumpsys input | grep InputFilter    # must be false
 ```
 
 ## References

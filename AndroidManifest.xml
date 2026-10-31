@@ -13,10 +13,15 @@
     <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" />
 
     <!--
-        No INTERNET / foreground-service / boot permissions: the adb gear bridge
-        that needed them is retired (it could not survive a reboot without a new
-        "Allow USB debugging" approval). See GearBridgeService for the analysis.
+        Gear bridge: reads the raw gear event over the device's own adbd. The
+        input pipeline is left alone, which is what keeps the native volume
+        long-press ramp working in every app.
     -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:label="@string/app_name"
@@ -50,7 +55,7 @@
                 android.app.action.TOGGLE_NOTIFICATION_HANDLER_PANEL" drive the
                 panel for testing. SystemUI itself never picks a normal app for it
                 (it requires a system-signed handler), so the physical button is
-                served by KeyService's accessibility filter.
+                served by GearBridgeService over adbd.
             -->
             <intent-filter>
                 <action android:name="android.app.action.TOGGLE_NOTIFICATION_HANDLER_PANEL" />
@@ -58,30 +63,23 @@
             </intent-filter>
         </activity>
 
-        <!--
-            Gear button. Declared again: SystemUI owns keycode 83 (the gear) and
-            will only forward it to a system-signed notification-panel handler, so
-            a normal app has to see the key through accessibility key filtering.
-            KeyService passes every other key through untouched, so the native
-            volume long-press keeps working (see its class docs).
-
-            GearBridgeService (raw /dev/input/event4 over adbd) is NOT declared:
-            adbd re-prompts for USB debugging after every reconnect on this
-            build, which a remote-only TV cannot tolerate. Source kept as the
-            documented alternative in docs/analysis/adb-gear-bridge.md.
-        -->
         <service
-            android:name=".KeyService"
-            android:exported="true"
-            android:label="@string/service_label"
-            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
-            <intent-filter>
-                <action android:name="android.accessibilityservice.AccessibilityService" />
-            </intent-filter>
-            <meta-data
-                android:name="android.accessibilityservice"
-                android:resource="@xml/key_service" />
+            android:name=".GearBridgeService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Watches the remote gear button over the device's own adb daemon" />
         </service>
+
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+            </intent-filter>
+        </receiver>
 
     </application>
 </manifest>

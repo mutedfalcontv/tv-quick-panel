@@ -5,6 +5,10 @@ import android.content.SharedPreferences;
 import android.util.Base64;
 import android.util.Log;
 
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.InputStreamReader;
 import java.math.BigInteger;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -19,11 +23,16 @@ import java.security.spec.PKCS8EncodedKeySpec;
 /**
  * The RSA key this app presents to adbd.
  *
- * <p>Generated once on first use and kept in SharedPreferences. The TV shows the
- * usual "Allow USB debugging?" dialog the first time the bridge connects; the
- * fingerprint is derived from this key, so accepting it once is enough until the
- * app is uninstalled (which deletes the private key and therefore requires a new
- * approval).
+ * <p>If {@code adbkey} (a PEM PKCS#8 key, the file an ADB host keeps in
+ * {@code ~/.android}) is present in the app's external files directory, it is
+ * used. Pushing the same key the PC already authorized means the bridge
+ * authenticates with no "Allow USB debugging?" dialog at all, and nothing
+ * depends on the TV persisting a key it has just been shown.
+ *
+ * <p>Without that file the key is generated once and kept in SharedPreferences.
+ * The TV then shows the usual "Allow USB debugging?" dialog on first connect;
+ * the dialog and the persistence of the approval are unreliable on this
+ * firmware, which is why the pushed key is the documented setup.
  */
 public final class AdbKey {
 
@@ -34,10 +43,24 @@ public final class AdbKey {
     /** Name shown in the TV's authorization dialog and in adb_keys. */
     private static final String KEY_NAME = "tvquick@tv";
 
+    /**
+     * Name sent with the public key. adbd matches an adb_keys entry by the whole
+     * key line, name included: the same key material under a different name is a
+     * different entry, and shows the authorization dialog again. When a pushed
+     * key is used, its own name (from {@code adbkey.pub}) is sent.
+     */
+    private static volatile String sName = KEY_NAME;
+
     private AdbKey() {
     }
 
     public static synchronized PrivateKey get(Context context) {
+        PrivateKey pushed = readPushedKey(context);
+        if (pushed != null) {
+            sName = readPushedKeyName(context);
+            Log.i(TAG, "using pushed adb key, name=" + sName);
+            return pushed;
+        }
         SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         String stored = prefs.getString(KEY_PKCS8, null);
         if (stored != null) {
@@ -62,6 +85,68 @@ public final class AdbKey {
         } catch (Exception e) {
             throw new IllegalStateException("cannot create the adb key", e);
         }
+    }
+
+    /** Reads {@code adbkey} from the app's external files dir, if present. */
+    private static PrivateKey readPushedKey(Context context) {
+        File dir = context.getExternalFilesDir(null);
+        if (dir == null) {
+            return null;
+        }
+        File file = new File(dir, "adbkey");
+        if (!file.isFile()) {
+            return null;
+        }
+        StringBuilder body = new StringBuilder(768);
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(new FileInputStream(file), StandardCharsets.US_ASCII))) {
+            boolean inBody = false;
+            String line;
+            while ((line = reader.readLine()) != null) {
+                line = line.trim();
+                if (line.startsWith("-----BEGIN")) {
+                    inBody = true;
+                } else if (line.startsWith("-----END")) {
+                    break;
+                } else if (inBody) {
+                    body.append(line);
+                }
+            }
+            byte[] der = Base64.decode(body.toString(), Base64.NO_WRAP);
+            return KeyFactory.getInstance("RSA")
+                    .generatePrivate(new PKCS8EncodedKeySpec(der));
+        } catch (Exception e) {
+            Log.w(TAG, "pushed adb key unusable: " + e);
+            return null;
+        }
+    }
+
+    /** Reads the key name from {@code adbkey.pub} ("<base64> <name>"). */
+    private static String readPushedKeyName(Context context) {
+        File dir = context.getExternalFilesDir(null);
+        if (dir == null) {
+            return KEY_NAME;
+        }
+        File file = new File(dir, "adbkey.pub");
+        if (!file.isFile()) {
+            return KEY_NAME;
+        }
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(new FileInputStream(file), StandardCharsets.US_ASCII))) {
+            String line = reader.readLine();
+            if (line != null) {
+                int space = line.indexOf(' ');
+                if (space > 0) {
+                    String name = line.substring(space + 1).trim();
+                    if (!name.isEmpty()) {
+                        return name;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "cannot read adbkey.pub: " + e);
+        }
+        return KEY_NAME;
     }
 
     /**
@@ -109,7 +194,7 @@ public final class AdbKey {
         buffer.putInt(crt.getPublicExponent().intValue());
 
         String encoded = Base64.encodeToString(buffer.array(), Base64.NO_WRAP);
-        return (encoded + " " + KEY_NAME + "\0").getBytes(StandardCharsets.UTF_8);
+        return (encoded + " " + sName + "\0").getBytes(StandardCharsets.UTF_8);
     }
 
     private static void putWords(ByteBuffer buffer, BigInteger value, int words) {

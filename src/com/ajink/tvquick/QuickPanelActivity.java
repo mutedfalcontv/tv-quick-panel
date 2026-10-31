@@ -28,14 +28,12 @@ public class QuickPanelActivity extends Activity {
 
     /**
      * The intent SystemUI's TvNotificationPanel fires for the gear button
-     * (keycode 83). This activity declares it in the manifest, so SystemUI is what
-     * turns the physical key into a panel toggle.
+     * (keycode 83). Declaring it keeps the panel toggleable by that action (and
+     * by {@code am start} for testing); the physical key itself is read by
+     * GearBridgeService, which sends {@link #ACTION_TOGGLE}.
      */
     private static final String ACTION_TOGGLE_NOTIFICATION_PANEL =
             "android.app.action.TOGGLE_NOTIFICATION_HANDLER_PANEL";
-
-    /** Read by KeyService to decide open vs. close. */
-    static volatile boolean sVisible;
 
     private static final ComponentName INPUTS =
             new ComponentName("com.realtek.tv", "com.realtek.tv.SelectInputActivity");
@@ -111,9 +109,10 @@ public class QuickPanelActivity extends Activity {
 
         findViewById(R.id.tile_inputs).requestFocus();
 
-        // The gear key reaches this activity as a normal key event (the adb
-        // bridge and the accessibility filter are both retired - see
-        // docs/bugs/volume-long-press.md), so nothing has to be started here.
+        // The gear is read over adbd by GearBridgeService, and this is the only
+        // path that also leaves the volume long-press alone. Opening the panel
+        // starts it, so the button works from the first launch after install.
+        GearBridgeService.start(this);
     }
 
     private void bind(int id, final ComponentName target, final String fallbackAction) {
@@ -298,11 +297,6 @@ public class QuickPanelActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
-        sVisible = true;
-        // Coming back to this window (e.g. from a tile's settings page) raises no
-        // window-state event, so tell KeyService the gear filter belongs on.
-        sendBroadcast(new Intent(KeyService.ACTION_OURS_FOREGROUND)
-                .setPackage(getPackageName()));
         applyImmersive();
         updateClock();
         mHandler.removeCallbacks(mTick);
@@ -312,7 +306,6 @@ public class QuickPanelActivity extends Activity {
     @Override
     protected void onPause() {
         super.onPause();
-        sVisible = false;
         mHandler.removeCallbacks(mTick);
     }
 }
