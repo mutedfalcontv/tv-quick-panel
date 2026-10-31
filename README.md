@@ -58,7 +58,7 @@ adb install -r tv-quick-panel.apk
 adb shell pm grant com.ajink.tvquick android.permission.WRITE_SECURE_SETTINGS
 adb shell pm grant com.ajink.tvquick android.permission.POST_NOTIFICATIONS
 
-# Gear bridge: reuse the key this PC already authorized (no debugging dialog)
+# Gear bridge: reuse the key this PC already authorized (usually no dialog)
 adb shell mkdir -p /sdcard/Android/data/com.ajink.tvquick/files
 adb push %USERPROFILE%\.android\adbkey     /sdcard/Android/data/com.ajink.tvquick/files/adbkey
 adb push %USERPROFILE%\.android\adbkey.pub /sdcard/Android/data/com.ajink.tvquick/files/adbkey.pub

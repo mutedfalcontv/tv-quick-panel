@@ -14,10 +14,11 @@ material under a different name is a different entry, so every reconnect showed
 `adb_keys`, which adbd logs as `Invalid base64 key` and ignores.)
 
 The shipped version reuses the key the PC already authorized. The private key and
-`adbkey.pub` are pushed once into the app's external files dir, the app sends the
-exact same key line (material *and* name), and the framework auto-approves a key
-it stored with "always allow" - no dialog, no manual tap. Measured: connect to
-`getevent` in ~3 s with no UI.
+`adbkey.pub` are pushed once into the app's external files dir, and the app sends
+the exact same key line (material *and* name). The framework then auto-approves a
+key it stored with "always allow" - measured several times as a connect in ~3 s
+with no UI. This firmware still asks after some reconnects, so a tap on the TV is
+occasionally needed; once accepted the connection stays up.
 
 ## The constraint
 
