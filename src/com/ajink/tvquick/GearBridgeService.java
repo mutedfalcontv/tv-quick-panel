@@ -81,6 +81,20 @@ public class GearBridgeService extends Service {
     private static final int EV_KEY = 0x01;
 
     /**
+     * Record / voice keys that should open the Assistant. The RC600's record
+     * button is one of these; this input device advertises both codes, and the
+     * scancode still has to be confirmed with a physical press.
+     */
+    private static final int KEY_RECORD = 167;
+    private static final int KEY_VOICECOMMAND = 217;
+
+    /** Katniss's trampoline: the activity that starts the Assistant listening. */
+    private static final String ASSIST_COMPONENT =
+            "com.google.android.katniss/com.google.android.apps.tvsearch.app.launch.trampoline.SearchActivityTrampoline";
+
+    private static final long ASSIST_DEBOUNCE_MS = 1500;
+
+    /**
      * The RC600 remote's evdev node. Hardcoded because the app cannot enumerate
      * /dev/input itself; it matches this TV's stable enumeration (verified with
      * {@code getevent -p}, where both the RC600 and the IR receiver report
@@ -108,6 +122,7 @@ public class GearBridgeService extends Service {
     private volatile AdbConnection mConnection;
     private volatile boolean mRetryNow;
     private long mLastGearAt;
+    private long mLastAssistAt;
     /** True while the gear is physically held, so only a fresh press toggles. */
     private boolean mGearDown;
     private String mState = "starting";
@@ -296,14 +311,22 @@ public class GearBridgeService extends Service {
         // Skip the timeval, which is two 4-byte or two 8-byte fields.
         final int off = mEventSize == 24 ? 16 : 8;
         int type = (ev[off] & 0xFF) | ((ev[off + 1] & 0xFF) << 8);
-        int code = (ev[off + 2] & 0xFF) | ((ev[off + 3] & 0xFF) << 8);
-        if (type != EV_KEY || code != GEAR_SCANCODE) {
+        if (type != EV_KEY) {
             return;
         }
+        int code = (ev[off + 2] & 0xFF) | ((ev[off + 3] & 0xFF) << 8);
         int value = (ev[off + 4] & 0xFF)
                 | ((ev[off + 5] & 0xFF) << 8)
                 | ((ev[off + 6] & 0xFF) << 16)
                 | ((ev[off + 7] & 0xFF) << 24);
+        if (code == GEAR_SCANCODE) {
+            handleGear(value);
+        } else if (code == KEY_RECORD || code == KEY_VOICECOMMAND) {
+            handleAssist(code, value);
+        }
+    }
+
+    private void handleGear(int value) {
         if (value == 0) {
             // Release: re-arm the latch.
             mGearDown = false;
@@ -321,6 +344,38 @@ public class GearBridgeService extends Service {
         mLastGearAt = now;
         Log.i(TAG, "gear pressed");
         togglePanel();
+    }
+
+    /**
+     * The physical remote's record/voice key: start the Assistant with the TV's
+     * own microphone. The remote itself is a HID device only, so its microphone
+     * is not an audio source Android can use.
+     */
+    private void handleAssist(int code, int value) {
+        if (value != 1) {
+            return;
+        }
+        long now = SystemClock.elapsedRealtime();
+        if (now - mLastAssistAt < ASSIST_DEBOUNCE_MS) {
+            return;
+        }
+        mLastAssistAt = now;
+        Log.i(TAG, "assist key " + code);
+        AdbConnection connection = mConnection;
+        if (connection != null && !connection.isClosed()) {
+            try {
+                connection.exec("am start -n " + ASSIST_COMPONENT);
+                return;
+            } catch (Exception e) {
+                Log.w(TAG, "am start for the Assistant failed: " + e);
+            }
+        }
+        try {
+            startActivity(new Intent(Intent.ACTION_ASSIST)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        } catch (Exception e) {
+            Log.w(TAG, "cannot open the Assistant", e);
+        }
     }
 
     private void togglePanel() {

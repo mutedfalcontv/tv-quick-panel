@@ -50,6 +50,19 @@ running and fill in the Android keycode:
 | Mute | `113` / `0x0071` | `KEY_MUTE` | `164` `KEYCODE_VOLUME_MUTE` |
 | Mic / Assistant | `217` / `0x00d9` (often) | `KEY_VOICECOMMAND` | `231` `KEYCODE_VOICE_ASSIST` |
 | App shortcut keys (Netflix, YouTube, ...) | vendor-specific | vendor-specific | often `0x02e6`+ range; observe |
+| Record / voice | `167` / `0x00a7` or `217` / `0x00d9` | `KEY_RECORD` or `KEY_VOICECOMMAND` | handled by the bridge, see below |
+
+## Keys the bridge handles
+
+`GearBridgeService` reads the raw stream, so it acts on these codes even though
+the system does not:
+
+| Key | scancode | Action |
+| --- | --- | --- |
+| Gear | `501` (`KEY_BRL_DOT5`) | toggle the panel |
+| Record / voice | `167` (`KEY_RECORD`) or `217` (`KEY_VOICECOMMAND`) | start the Assistant (`...SearchActivityTrampoline`), which listens with the TV's built-in mic |
+
+The physical record button sends one of those two; a capture confirms which.
 
 ## How to extend the table
 
