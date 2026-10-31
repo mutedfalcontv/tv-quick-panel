@@ -1,7 +1,8 @@
 # Bug: long-pressing HOME has no usable handler (crash reported)
 
-**Status:** cause identified (2026-10-31); fix staged, long-press not tested on
-purpose because the TV reportedly reboots
+**Status:** fixed by resolving the action to the panel (2026-10-31); the long
+press itself was not sent on purpose because the TV reportedly reboots - owner to
+verify
 **Device:** MOKA R4G, Android 14 (SDK 34), RC600 remote
 **Related:** `docs/analysis/rc600-remote-buttons.md`, `docs/bugs/home-button-reboot.md`
 
@@ -47,17 +48,37 @@ and treats `ACTION_ALL_APPS` as an open gesture (only the toggle actions finish
 the activity). With a single resolver, a physical long-press HOME opens the quick
 panel and the missing-handler error path disappears.
 
-## What is still needed
+## What was still needed
 
-* Remove Projectivy from the `ACTION_ALL_APPS` resolution. ADB cannot disable a
-  single component of another app (`SecurityException: Shell cannot change
-  component state`), so the choice is:
-  * `pm disable-user com.spocky.projengmenu` (whole package, reversible with
-    `pm enable com.spocky.projengmenu`), if Projectivy is no longer used; or
-  * keep both and pick "Quick Panel - Always" once in the chooser; or
-  * a bridge fallback that detects HOME long-press in the raw stream (passive -
-    it cannot stop the system's own handler from running).
-* Then verify with a **real long-press**, only with the owner's approval.
+Remove Projectivy from the `ACTION_ALL_APPS` resolution. ADB cannot disable a
+single component of another app (`SecurityException: Shell cannot change
+component state`), so the whole package was disabled (below). Alternatives were
+keeping both and choosing "Quick Panel - Always" once in the chooser, or a
+passive bridge fallback - which would not stop the system handler from running.
+
+## Decision and verification (2026-10-31)
+
+Projectivy was removed from the resolution:
+
+```sh
+adb shell pm disable-user --user 0 com.spocky.projengmenu   # reversible
+# to restore: adb shell pm enable com.spocky.projengmenu
+```
+
+Resolution now returns exactly one activity, and launching the same intent the
+policy uses opens the panel:
+
+```
+cmd package query-activities -a android.intent.action.ALL_APPS
+  -> com.ajink.tvquick.QuickPanelActivity (only)
+
+am start -a android.intent.action.ALL_APPS
+  -> topResumedActivity = com.ajink.tvquick/.QuickPanelActivity
+  -> ActivityTaskManager: START ... cmp=com.ajink.tvquick/.QuickPanelActivity
+```
+
+No chooser and no error. The remaining step is a physical long-press to confirm
+end to end; that is the owner's call because of the reported reboot.
 
 ## Safe verification without a long-press
 
