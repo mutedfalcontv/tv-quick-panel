@@ -57,8 +57,20 @@
                 (it requires a system-signed handler), so the physical button is
                 served by GearBridgeService over adbd.
             -->
-            <intent-filter>
+            <intent-filter android:priority="100">
                 <action android:name="android.app.action.TOGGLE_NOTIFICATION_HANDLER_PANEL" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+
+            <!--
+                Long-pressing HOME sends ACTION_ALL_APPS (framework
+                config_longPressOnHomeBehavior = 1). The stock launcher used to
+                answer it and hosts the TV's quick panel; with that launcher
+                disabled the action had no useful handler. This activity now
+                answers it so the same gesture opens this panel.
+            -->
+            <intent-filter android:priority="100">
+                <action android:name="android.intent.action.ALL_APPS" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>

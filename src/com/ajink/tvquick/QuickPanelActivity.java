@@ -282,9 +282,10 @@ public class QuickPanelActivity extends Activity {
         super.onNewIntent(intent);
         String action = intent == null ? null : intent.getAction();
         // Re-entry only happens when this activity is already at the top of its
-        // task, so both actions mean "close it". Do not consult a visibility
-        // flag: the panel is paused for a moment around the hand-off and would
-        // latch the wrong state.
+        // task, so both toggle actions mean "close it". Do not consult a
+        // visibility flag: the panel is paused for a moment around the hand-off
+        // and would latch the wrong state. ACTION_ALL_APPS (long-press HOME) is
+        // an "open" gesture and deliberately falls through to stay open.
         if (ACTION_TOGGLE.equals(action)
                 || ACTION_TOGGLE_NOTIFICATION_PANEL.equals(action)) {
             finish();
