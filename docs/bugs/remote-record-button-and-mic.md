@@ -1,7 +1,8 @@
 # Bug: the remote's record/voice button does nothing, and its mic is unusable
 
-**Status:** mic limitation confirmed; the record key is now mapped to the Assistant
-in the bridge (2026-10-31), waiting on a physical press to confirm the scancode
+**Status:** reported as a regression ("used to work before an update"); the remote
+key is mapped to the Assistant in the bridge, but the remote's own mic still has no
+audio path. Update timeline and the self-help steps are below.
 **Device:** MOKA R4G, Android 14 (SDK 34), RC600 remote
 **Area:** remote input / Google Assistant / audio input
 **Related:** `docs/analysis/rc600-remote-buttons.md`
@@ -108,6 +109,38 @@ adb logcat -s TvGearBridge:I     # expect: assist key 167 (or 217)
 
 Still to verify by speaking: whether the built-in mic actually picks up sound
 (the AudioRecord path is confirmed, the transducer is not).
+
+## Regression note: "it used to work before an update"
+
+Reported on 2026-10-31. Timestamps on the device:
+
+| Item | Value |
+| --- | --- |
+| Firmware build | `PANASONIC/PANASONIC/R4_GTV:14/UKR1.260308/5597`, built 2026-06-03, security patch 2026-04-05 |
+| `com.google.android.tv.remote.service` | updated 2026-10-17 (7.00.999235495) |
+| `com.google.android.katniss` (Assistant) | updated **2026-10-27** (7.55.87) |
+| `com.google.android.gms` | updated **2026-10-30** (26.42.31) |
+| Assistant mic permission | `RECORD_AUDIO: granted=true`, appops `allow` |
+| Headset (HFP) service | `mActiveDevice: null`, `mVoiceRecognitionStarted: false` - no Bluetooth mic in use |
+
+So the two Google app updates land immediately before the regression window. The
+mic permission and the Assistant's AudioRecord path are healthy; what is missing is
+the remote's audio/voice channel (it is bonded as HOGP HID only).
+
+Steps worth trying, cheapest first:
+
+1. **Re-pair the RC600** (remove the remote in Settings > Remotes & accessories,
+   then pair again). This is the fix TV vendors recommend when the mic button
+   stops working after a TV/app update, and it forces the remote's voice service
+   to be re-bound.
+2. Force-stop the Assistant app and open it again. No data is lost.
+3. Check the TV's physical mic mute / "Built-in MIC" switch, if this model has
+   one, and the Assistant's microphone permission (already granted here).
+4. If the remote still has no mic path, use the phone ATV remote app (confirmed
+   working) or a USB microphone.
+
+Rolling the Google app back is not possible without root; re-pairing is the only
+non-destructive reset for the remote side.
 
 ## Open questions
 
