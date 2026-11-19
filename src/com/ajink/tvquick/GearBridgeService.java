@@ -20,8 +20,13 @@ import com.ajink.tvquick.adb.AdbConnection;
 import com.ajink.tvquick.adb.AdbKey;
 
 import java.io.IOException;
+import java.net.Inet4Address;
+import java.net.InetAddress;
+import java.net.NetworkInterface;
 import java.nio.charset.StandardCharsets;
 import java.security.PrivateKey;
+import java.util.Collections;
+import java.util.Enumeration;
 
 /**
  * Watches the RC600 gear button over the device's own adb daemon and opens the
@@ -72,13 +77,16 @@ public class GearBridgeService extends Service {
 
     private static final String ACTION_START = "com.ajink.tvquick.action.START_BRIDGE";
     private static final String ACTION_STOP = "com.ajink.tvquick.action.STOP_BRIDGE";
+    /** Set by the boot receiver: the first connect waits out the framework's boot-time key-file rewrite. */
+    private static final String EXTRA_FROM_BOOT = "from_boot";
 
     private static final String CHANNEL_ID = "gear_bridge";
     private static final int NOTIFICATION_ID = 42;
 
     /** adbd listens here because service.adb.tcp.port=5555 on this TV. */
     private static final int ADB_PORT = 5555;
-    private static final String ADB_HOST = "127.0.0.1";
+    /** Fallback when the device has no LAN address; see {@link #adbHost()}. */
+    private static final String ADB_LOOPBACK = "127.0.0.1";
 
     /** Kernel scancode of the gear button (KEY_BRL_DOT5 on the RC600). */
     private static final int GEAR_SCANCODE = 501;
@@ -132,6 +140,9 @@ public class GearBridgeService extends Service {
     /** Budget for the liveness probe and the getevent -p listing. */
     private static final long SHELL_PROBE_TIMEOUT_MS = 10_000;
 
+    /** How long the first connect after boot waits for the framework's key-file rewrite. */
+    private static final long BOOT_CONNECT_DELAY_MS = 15_000;
+
     private static final String PANEL_ACTION_TOGGLE = QuickPanelActivity.ACTION_TOGGLE;
     private static final String PANEL_COMPONENT =
             "com.ajink.tvquick/com.ajink.tvquick.QuickPanelActivity";
@@ -149,6 +160,7 @@ public class GearBridgeService extends Service {
     private volatile long mLastStreamDataAt;
     /** Set by the screen-on receiver: verify the stream on the next watchdog pass. */
     private volatile boolean mVerifyNow;
+    private volatile boolean mDelayFirstConnect;
     private Thread mWatchdog;
 
     private final BroadcastReceiver mScreenReceiver = new BroadcastReceiver() {
@@ -190,9 +202,14 @@ public class GearBridgeService extends Service {
     private volatile BridgeState mState = BridgeState.STARTING;
     private GearLatch mLatch = GearLatch.UP;
 
-    public static void start(android.content.Context context) {
+    public static void start(Context context) {
+        start(context, false);
+    }
+
+    public static void start(Context context, boolean fromBoot) {
         Intent i = new Intent(context, GearBridgeService.class);
         i.setAction(ACTION_START);
+        i.putExtra(EXTRA_FROM_BOOT, fromBoot);
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(i);
@@ -235,6 +252,9 @@ public class GearBridgeService extends Service {
         if (intent != null && ACTION_STOP.equals(intent.getAction())) {
             stopSelf();
             return START_NOT_STICKY;
+        }
+        if (intent != null && intent.getBooleanExtra(EXTRA_FROM_BOOT, false)) {
+            mDelayFirstConnect = true;
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundInternal();
@@ -283,6 +303,34 @@ public class GearBridgeService extends Service {
 
     // ---------------------------------------------------------------- worker
 
+    /**
+     * The address to reach this device's own adbd. The daemon listens on every
+     * interface, and this firmware treats LAN peers very differently from
+     * loopback ones: a PC connecting over the network has been authorized
+     * silently all evening while every loopback connection from this very app
+     * was re-prompted, so prefer the device's own LAN address and only fall
+     * back to the loopback when there is none.
+     */
+    private static String adbHost() {
+        try {
+            for (Enumeration<NetworkInterface> nis = NetworkInterface.getNetworkInterfaces();
+                 nis.hasMoreElements(); ) {
+                NetworkInterface ni = nis.nextElement();
+                if (!ni.isUp() || ni.isLoopback()) {
+                    continue;
+                }
+                for (InetAddress addr : Collections.list(ni.getInetAddresses())) {
+                    if (addr instanceof Inet4Address && !addr.isLoopbackAddress()) {
+                        return addr.getHostAddress();
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "cannot resolve a LAN address for adbd", e);
+        }
+        return ADB_LOOPBACK;
+    }
+
     private void runLoop() {
         long backoff = 1000;
         int authFailures = 0;
@@ -294,11 +342,20 @@ public class GearBridgeService extends Service {
             return;
         }
         while (mRunning) {
+            if (mDelayFirstConnect) {
+                // Right after boot the framework rewrites the adb key file,
+                // and a connect that races that write sees a half-written key
+                // and pops the authorization prompt. Wait the rewrite out.
+                mDelayFirstConnect = false;
+                Log.i(TAG, "waiting out the boot-time adb key maintenance");
+                SystemClock.sleep(BOOT_CONNECT_DELAY_MS);
+            }
             AdbConnection connection = null;
             try {
                 setState(BridgeState.CONNECTING);
-                Log.i(TAG, "connecting to adb " + ADB_HOST + ":" + ADB_PORT);
-                connection = AdbConnection.open(ADB_HOST, ADB_PORT, key, (int) AUTH_WAIT_MS);
+                String host = adbHost();
+                Log.i(TAG, "connecting to adb " + host + ":" + ADB_PORT);
+                connection = AdbConnection.open(host, ADB_PORT, key, (int) AUTH_WAIT_MS);
                 mConnection = connection;
                 backoff = 1000;
                 authFailures = 0;
@@ -403,10 +460,14 @@ public class GearBridgeService extends Service {
             } catch (AdbConnection.AuthRequiredException e) {
                 setState(BridgeState.AUTHORIZING);
                 authFailures++;
-                // Every reconnect attempt makes adbd raise a fresh "Allow USB
-                // debugging?" dialog. Back off hard so the screen is not
-                // flooded; opening the panel retries immediately.
-                long authBackoff = 60_000L << Math.min(authFailures - 1, 3);
+                // Two different failure shapes land here: a genuinely unknown
+                // key, and a load that raced the framework's key-file rewrite
+                // (which follows every authorization within milliseconds). The
+                // race settles in seconds, so retry fast twice before falling
+                // back to the hard backoff that keeps the screen from flooding.
+                long authBackoff = authFailures <= 2
+                        ? 3_000L * authFailures
+                        : 60_000L << Math.min(authFailures - 3, 3);
                 backoff = Math.min(authBackoff, 300_000L);
                 Log.w(TAG, "adb key not authorized (attempt " + authFailures
                         + ") - accept the prompt on the TV, retrying in "

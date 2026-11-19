@@ -21,6 +21,6 @@ public class BootReceiver extends BroadcastReceiver {
             return;
         }
         Log.i(GearBridgeService.TAG, "boot completed, starting the gear bridge");
-        GearBridgeService.start(context);
+        GearBridgeService.start(context, true);
     }
 }

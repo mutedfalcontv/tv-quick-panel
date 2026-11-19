@@ -99,10 +99,68 @@ tapping Allow.** Verified live: an always-allow acceptance at 22:04:29 was
 followed 15 s later by a brand-new transport authorizing silently from
 `adb_keys` - no prompt, no framework round trip.
 
+## The boot-time race and the prompt queue (found 2026-11-19, later)
+
+Pulling the TV's adbd binary showed `Invalid base64 key` lives next to
+`Failed to encode RSA public key` - it is logged while parsing key material
+during an auth round, and the framework rewrites `adb_keys` right after every
+authorization and every disconnect. Our reconnects always land inside that
+rewrite window (boot, app install, watchdog teardown), read a half-written
+file, and pop the prompt; the PC's rare reconnects land outside it and sail
+through. adbd also only ever shows **one** pending prompt: every failed
+connect queues another one behind it, so after a reboot several stale dialogs
+have to be accepted before the live transport's turn arrives.
+
+Two more mitigations, on top of the transport reuse:
+
+1. **The first connect after boot waits 15 s** (`EXTRA_FROM_BOOT` from the boot
+   receiver) for the framework's boot-time key-file rewrite to finish.
+2. **Auth failures retry fast** (3 s, 6 s) before the old 60 s+ ladder - a
+   raced rewrite settles in milliseconds, and adbd skips duplicate prompts
+   while one is pending, so fast retries do not flood the screen.
+
 Combined with the transport-reuse fix above, new transports are now rare:
 standby reuses the authorized connection, and only a reboot, an app reinstall
 or a wedged transport needs one prompt - which, ticked with always-allow, does
 not come back immediately afterwards.
+
+## The real root cause: Android's 7-day ADB authorization timeout (found 2026-11-19)
+
+AOSP's `AdbDebuggingManager` (frameworks/base, services/core/java/com/android/
+server/adb/) tracks every "always allow" grant with a `lastConnectionTime` and
+an `authWindow` from `Settings.Global.ADB_ALLOWED_CONNECTION_TIME`
+(default 7 days). A daily job (`filterOutOldKeys`) deletes grants older than
+that window **and rewrites `adb_keys` without them**; the same prune runs when
+adb starts at boot. That is the boot-time drop: the key had gone unused for
+more than 7 days, so the boot prune deleted it before our first connect. The
+rewrite is also what produces the empty `Invalid base64 key` line - a load
+landing mid-rewrite (or a re-serialized empty entry) reads garbage.
+
+The framework itself exposes the escape hatch in `isKeyAuthorized`:
+
+```java
+// if the allowed connection time is 0 then revert to the previous behavior of
+// always allowing previously granted adb grants.
+return allowedConnectionTime == 0 || (now < lastConnectionTime + allowedConnectionTime);
+```
+
+**Fix applied on the TV (2026-11-19):**
+
+```sh
+adb shell settings put global adb_allowed_connection_time 0
+```
+
+With 0, `isKeyAuthorized` approves any previously-granted key without looking
+at the clock (the framework path no longer depends on the flappy file), the
+prune job becomes a no-op (no more rewrites, no more boot-time drops), and the
+"Disable adb authorization timeout" developer option on phones writes exactly
+this 0. This TV's trimmed developer options lack the toggle, but the framework
+still honors the setting.
+
+With the timeout disabled plus the transport-reuse and boot-delay changes
+above, a granted key should survive reboots indefinitely. If a prompt ever
+appears (firmware rewrite quirks), tick "Always allow from this computer" and
+Allow once - the grant then can no longer expire.
 
 ## Verification
 
