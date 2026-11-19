@@ -18,16 +18,30 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Set up JDK 21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '21'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install SDK platform and build tools
-        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+      # setup-android v3 still installs the retired "tools" package and fails.
+      # Install cmdline-tools directly instead.
+      - name: Install Android SDK
+        shell: pwsh
+        env:
+          ANDROID_HOME: C:\Android\android-sdk
+        run: |
+          $zip = Join-Path $env:TEMP "cmdline-tools.zip"
+          Invoke-WebRequest -Uri "https://dl.google.com/android/repository/commandlinetools-win-11076708_latest.zip" -OutFile $zip
+          $stage = Join-Path $env:TEMP "cmdline-tools-stage"
+          Expand-Archive -Path $zip -DestinationPath $stage -Force
+          $target = Join-Path $env:ANDROID_HOME "cmdline-tools\latest"
+          New-Item -ItemType Directory -Force -Path $target | Out-Null
+          Copy-Item (Join-Path $stage "cmdline-tools\*") $target -Recurse -Force
+          $sdkmanager = Join-Path $target "bin\sdkmanager.bat"
+          $null = ("y`n" * 40) | & $sdkmanager --licenses
+          & $sdkmanager "platforms;android-36" "build-tools;36.0.0"
+          if ($LASTEXITCODE -ne 0) { throw "sdkmanager failed" }
+          "ANDROID_HOME=$env:ANDROID_HOME" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Create CI debug keystore
         shell: pwsh
