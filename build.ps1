@@ -32,13 +32,19 @@ if ($LASTEXITCODE -ne 0) { throw "aapt2 link failed" }
 Write-Host "== javac"
 $Sources = @(Get-ChildItem -Recurse -File "$Root\src" -Filter *.java | ForEach-Object { $_.FullName })
 $Sources += @(Get-ChildItem -Recurse -File "$Build\gen" -Filter *.java | ForEach-Object { $_.FullName })
-& "$Jdk\bin\javac.exe" -nowarn -source 11 -target 11 -classpath $Jar -d "$Build\classes" @Sources
+# An @argfile instead of splatting the array: some PowerShell 7 hosts mangle
+# long native argument lists, and javac then compiles nothing yet exits 0.
+$Sources | Out-File "$Build\sources.txt" -Encoding ascii
+& "$Jdk\bin\javac.exe" -nowarn -source 11 -target 11 -classpath $Jar -d "$Build\classes" "@$Build\sources.txt"
 if ($LASTEXITCODE -ne 0) { throw "javac failed" }
+if (-not (Get-ChildItem -Recurse -File "$Build\classes" -Filter *.class)) { throw "javac produced no class files" }
 
 Write-Host "== d8"
 $Classes = @(Get-ChildItem -Recurse -File "$Build\classes" -Filter *.class | ForEach-Object { $_.FullName })
-& "$Bt\d8.bat" --min-api 21 --lib $Jar --output "$Build\dex" @Classes
+$Classes | Out-File "$Build\classes.txt" -Encoding ascii
+& "$Jdk\bin\java.exe" -cp "$Bt\lib\d8.jar" com.android.tools.r8.D8 --min-api 21 --lib $Jar --output "$Build\dex" "@$Build\classes.txt"
 if ($LASTEXITCODE -ne 0) { throw "d8 failed" }
+if (-not (Test-Path "$Build\dex\classes.dex")) { throw "d8 produced no classes.dex" }
 
 Write-Host "== inject classes.dex"
 Add-Type -AssemblyName System.IO.Compression.FileSystem

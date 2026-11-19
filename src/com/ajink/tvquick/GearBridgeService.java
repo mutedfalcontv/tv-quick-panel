@@ -337,32 +337,68 @@ public class GearBridgeService extends Service {
                 }
                 Log.i(TAG, "reading " + device);
 
-                AdbConnection.Stream stream = connection.openShell("cat " + device);
-                mStreamDevice = device;
-                mLastStreamDataAt = SystemClock.elapsedRealtime();
+                // A standby kills the shell but usually leaves the transport
+                // alive. When the stream ends, reopen it on the SAME
+                // connection: every new transport makes this firmware raise
+                // the authorization prompt again (the framework's always-allow
+                // record is not honored), so a reconnect is the last resort.
+                boolean reopen = true;
+                while (mRunning && reopen) {
+                    reopen = false;
+                    AdbConnection.Stream stream = connection.openShell("cat " + device);
+                    mStreamDevice = device;
+                    mLastStreamDataAt = SystemClock.elapsedRealtime();
 
-                byte[] chunk = new byte[4096];
-                byte[] event = new byte[mEventSize];
-                int have = 0;
-                int n;
-                long received = 0;
-                while (mRunning && (n = stream.read(chunk)) >= 0) {
-                    if (n > 0) {
-                        mLastStreamDataAt = SystemClock.elapsedRealtime();
-                    }
-                    received += n;
-                    for (int i = 0; i < n; i++) {
-                        event[have++] = chunk[i];
-                        if (have == mEventSize) {
-                            handleEvent(event);
-                            have = 0;
+                    byte[] chunk = new byte[4096];
+                    byte[] event = new byte[mEventSize];
+                    int have = 0;
+                    int n;
+                    long received = 0;
+                    while (mRunning && (n = stream.read(chunk)) >= 0) {
+                        if (n > 0) {
+                            mLastStreamDataAt = SystemClock.elapsedRealtime();
+                        }
+                        received += n;
+                        for (int i = 0; i < n; i++) {
+                            event[have++] = chunk[i];
+                            if (have == mEventSize) {
+                                handleEvent(event);
+                                have = 0;
+                            }
                         }
                     }
-                }
-                if (mRunning) {
-                    setState(BridgeState.RECONNECTING);
-                    Log.w(TAG, "input stream ended after " + received + " bytes");
-                    backoff = 2000;
+                    mStreamDevice = null;
+                    if (mRunning) {
+                        Log.w(TAG, "input stream ended after " + received + " bytes");
+                        // Re-resolve on the same transport: the node may have
+                        // changed or vanished with the remote. A wedged
+                        // transport throws and falls into the reconnect path.
+                        String again = findGearDevice(connection);
+                        int gone = 0;
+                        while (again == null && mRunning) {
+                            setState(BridgeState.RECONNECTING);
+                            if (gone == 0) {
+                                Log.i(TAG, "RC600 input node gone; waiting on this transport");
+                            }
+                            gone++;
+                            try {
+                                Thread.sleep(2000);
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                                return;
+                            }
+                            again = findGearDevice(connection);
+                        }
+                        if (!mRunning) {
+                            return;
+                        }
+                        device = again;
+                        // A fresh shell carries no history; the remote's state
+                        // is unknown, so re-arm the latch.
+                        mLatch = GearLatch.UP;
+                        Log.i(TAG, "reopening the event stream on the same transport");
+                        reopen = true;
+                    }
                 }
             } catch (AdbConnection.AuthRequiredException e) {
                 setState(BridgeState.AUTHORIZING);
