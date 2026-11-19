@@ -9,6 +9,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
@@ -92,18 +93,38 @@ public final class AdbConnection implements Closeable {
 
     /** One open ADB stream (a shell command's stdout). */
     public static final class Stream implements Closeable {
+
+        /** Explicit lifecycle of a single shell stream. */
+        enum State {
+            /** OPEN sent, waiting for adbd's OKAY. */
+            PENDING,
+            /** OKAY received; data may arrive. */
+            OPEN,
+            /** CLSE received, or closed locally. */
+            CLOSED
+        }
+
         final int localId;
         final LinkedBlockingQueue<byte[]> chunks = new LinkedBlockingQueue<>();
         final CountDownLatch ready = new CountDownLatch(1);
         private volatile int remoteId;
-        private volatile boolean closed;
+        private volatile State state = State.PENDING;
 
         Stream(int localId) {
             this.localId = localId;
         }
 
+        State state() {
+            return state;
+        }
+
+        boolean isOpen() {
+            return state == State.OPEN;
+        }
+
         void markReady(int remoteId) {
             this.remoteId = remoteId;
+            this.state = State.OPEN;
             ready.countDown();
         }
 
@@ -114,14 +135,16 @@ public final class AdbConnection implements Closeable {
         }
 
         void markClosed() {
-            closed = true;
+            state = State.CLOSED;
             ready.countDown();
         }
 
         /**
          * Blocks until some output is available.
          *
-         * @return number of bytes copied, or -1 when the stream has ended
+         * @return number of bytes copied, or -1 only when the stream is CLOSED
+         * @throws IOException when the reading thread was interrupted - the caller
+         *                     can then tell an interrupt apart from a clean close
          */
         public int read(byte[] dst) throws IOException {
             while (true) {
@@ -130,7 +153,7 @@ public final class AdbConnection implements Closeable {
                     head = chunks.poll(500, TimeUnit.MILLISECONDS);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
-                    return -1;
+                    throw new IOException("interrupted while reading a shell stream", e);
                 }
                 if (head != null) {
                     if (head.length <= dst.length) {
@@ -144,7 +167,7 @@ public final class AdbConnection implements Closeable {
                     chunks.offer(rest);
                     return dst.length;
                 }
-                if (closed) {
+                if (state == State.CLOSED) {
                     return -1;
                 }
             }
@@ -152,7 +175,7 @@ public final class AdbConnection implements Closeable {
 
         @Override
         public void close() {
-            closed = true;
+            state = State.CLOSED;
         }
 
         int remoteId() {
@@ -167,12 +190,18 @@ public final class AdbConnection implements Closeable {
         byte[] payload = EMPTY;
     }
 
+    /** Explicit transport lifecycle: the reader thread and every stream obey it. */
+    enum TransportState {
+        OPEN,
+        CLOSED
+    }
+
     private final Socket socket;
     private final InputStream in;
     private final OutputStream out;
     private final Map<Integer, Stream> streams = new HashMap<>();
     private int nextLocalId = 1;
-    private volatile boolean closed;
+    private volatile TransportState state = TransportState.OPEN;
     private Thread reader;
 
     private AdbConnection(Socket socket) throws IOException {
@@ -210,30 +239,58 @@ public final class AdbConnection implements Closeable {
         }
     }
 
+    /**
+     * Explicit handshake phase. Kept as a named step instead of a bare counter so a
+     * stalled authorization is reported as such, not as a generic timeout.
+     */
+    enum Handshake {
+        SENT_CNXN,
+        SIGNED_TOKEN,
+        AWAITING_APPROVAL,
+        COMPLETE
+    }
+
     private void handshake(PrivateKey key) throws IOException {
         send(CMD_CNXN, A_VERSION, MAX_PAYLOAD, ("host::features=shell_v2,adb_native_data:1").getBytes(StandardCharsets.UTF_8));
-        int step = 0;
+        Handshake phase = Handshake.SENT_CNXN;
         while (true) {
-            Packet p = readPacket();
+            Packet p;
+            try {
+                p = readPacket();
+            } catch (SocketTimeoutException e) {
+                if (phase == Handshake.AWAITING_APPROVAL) {
+                    // The key is unknown to adbd and the on-screen prompt was never
+                    // accepted. This is the one failure that deserves its own state.
+                    throw new AuthRequiredException(
+                            "adb authorization prompt not accepted within the timeout");
+                }
+                throw e;
+            }
             if (p.command == CMD_CNXN) {
+                phase = Handshake.COMPLETE;
                 return;
             }
             if (p.command == CMD_AUTH && p.arg0 == AUTH_TOKEN) {
-                if (step == 0) {
+                if (phase == Handshake.SENT_CNXN) {
                     // Prove we own the key adbd may already know.
                     send(CMD_AUTH, AUTH_SIGNATURE, 0, sign(key, p.payload));
-                    step = 1;
+                    phase = Handshake.SIGNED_TOKEN;
                     continue;
                 }
-                if (step == 1) {
+                if (phase == Handshake.SIGNED_TOKEN) {
                     // Unknown key: hand over the public half so adbd can show
                     // the "Allow USB debugging?" dialog. It blocks until the
                     // user answers, then sends CNXN.
                     send(CMD_AUTH, AUTH_RSAPUBLICKEY, 0, AdbKey.publicKeyPayload(key));
-                    step = 2;
+                    phase = Handshake.AWAITING_APPROVAL;
                     continue;
                 }
-                throw new AuthRequiredException("device rejected the adb key");
+                // adbd repeats the token while the dialog is on screen. Closing
+                // the transport here would make the user's "Allow" land on a
+                // dead connection ("authorization received for deleted
+                // transport"), so the key would never be stored and the dialog
+                // would return on every connection. Keep waiting for CNXN.
+                continue;
             }
             throw new IOException("unexpected handshake packet 0x" + Integer.toHexString(p.command));
         }
@@ -259,7 +316,7 @@ public final class AdbConnection implements Closeable {
             public void run() {
                 Log.i("TvGearBridge", "reader thread start");
                 try {
-                    while (!closed) {
+                    while (state == TransportState.OPEN) {
                         Packet p = readPacket();
                         Stream stream = streamFor(p.arg1);
                         if (DEBUG_PACKETS && mTraceCount < 24) {
@@ -290,7 +347,7 @@ public final class AdbConnection implements Closeable {
                     }
                 } catch (IOException e) {
                     Log.w("TvGearBridge", "reader stopped: " + e);
-                    if (!closed) {
+                    if (state == TransportState.OPEN) {
                         closeQuietly();
                     }
                 }
@@ -414,7 +471,7 @@ public final class AdbConnection implements Closeable {
     }
 
     public boolean isClosed() {
-        return closed;
+        return state == TransportState.CLOSED;
     }
 
     private void closeQuietly() {
@@ -427,7 +484,7 @@ public final class AdbConnection implements Closeable {
 
     @Override
     public void close() throws IOException {
-        closed = true;
+        state = TransportState.CLOSED;
         synchronized (streams) {
             for (Stream s : streams.values()) {
                 s.markClosed();

@@ -11,3 +11,7 @@ build/
 .idea/
 .vscode/
 Thumbs.db
+
+# local tools
+.opencode/
+graphify-out/

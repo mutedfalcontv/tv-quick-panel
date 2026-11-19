@@ -1,14 +1,18 @@
 # Builds tv-quick-panel.apk with the plain SDK toolchain (aapt2 -> javac -> d8 -> apksigner).
 $ErrorActionPreference = "Stop"
 
-$Root  = "C:\Users\ajink\projects\tv-quick-panel"
-$Sdk   = "C:\Android\android-sdk"
-$Bt    = "$Sdk\build-tools\36.0.0"
-$Jar   = "$Sdk\platforms\android-36\android.jar"
-$Jdk   = "C:\Program Files\Eclipse Adoptium\jdk-21.0.9.10-hotspot"
-$Build = "$Root\build"
+# Env overrides let CI build on a clean runner; the defaults stay the local dev setup.
+$Root      = if ($env:APP_ROOT) { $env:APP_ROOT } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+$Sdk       = if ($env:ANDROID_HOME) { $env:ANDROID_HOME } elseif ($env:ANDROID_SDK_ROOT) { $env:ANDROID_SDK_ROOT } else { "C:\Android\android-sdk" }
+$BtVersion = if ($env:ANDROID_BUILD_TOOLS) { $env:ANDROID_BUILD_TOOLS } else { "36.0.0" }
+$Platform  = if ($env:ANDROID_PLATFORM) { $env:ANDROID_PLATFORM } else { "android-36" }
+$Bt        = "$Sdk\build-tools\$BtVersion"
+$Jar       = "$Sdk\platforms\$Platform\android.jar"
+# JAVA_HOME on developer machines often points at an old JDK, so use an explicit override.
+$Jdk       = if ($env:TVQP_JAVA_HOME) { $env:TVQP_JAVA_HOME } else { "C:\Program Files\Eclipse Adoptium\jdk-21.0.9.10-hotspot" }
+$Build     = "$Root\build"
 
-# d8/apksigner are .bat wrappers that resolve java from PATH; force the JDK 21 we compile with.
+# d8/apksigner are .bat wrappers that resolve java from PATH; force the JDK that compiled us.
 $env:JAVA_HOME = $Jdk
 $env:PATH = "$Jdk\bin;$env:PATH"
 

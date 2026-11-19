@@ -11,9 +11,11 @@ import android.text.format.DateFormat;
 import android.util.Log;
 import android.view.KeyEvent;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
+import android.view.animation.DecelerateInterpolator;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -107,12 +109,53 @@ public class QuickPanelActivity extends Activity {
         bind(R.id.gear, SETTINGS, "android.settings.SETTINGS");
         findViewById(R.id.home).setOnClickListener(v -> launchLauncher());
 
+        installFocusLift();
         findViewById(R.id.tile_inputs).requestFocus();
 
         // The gear is read over adbd by GearBridgeService, and this is the only
         // path that also leaves the volume long-press alone. Opening the panel
         // starts it, so the button works from the first launch after install.
         GearBridgeService.start(this);
+    }
+
+    /**
+     * D-pad focus lift, matching the launcher's TileView: 4.5% on a tile, 10%
+     * on the round header buttons, 120ms ease. The background selector already
+     * draws the ring and the focused specular; this is what makes the focused
+     * pane feel like it came forward instead of just changing colour.
+     */
+    private void installFocusLift() {
+        int[] tiles = {R.id.tile_inputs, R.id.tile_display, R.id.tile_sound,
+                R.id.tile_wifi, R.id.tile_bluetooth, R.id.tile_accessibility};
+        for (int id : tiles) {
+            addFocusLift(id, 1.045f);
+        }
+        addFocusLift(R.id.home, 1.10f);
+        addFocusLift(R.id.gear, 1.10f);
+
+        View content = findViewById(android.R.id.content);
+        if (content instanceof ViewGroup) {
+            ((ViewGroup) content).setClipChildren(false);
+            ((ViewGroup) content).setClipToPadding(false);
+        }
+    }
+
+    private void addFocusLift(int id, final float scale) {
+        View view = findViewById(id);
+        if (view == null) {
+            return;
+        }
+        view.setOnFocusChangeListener(new View.OnFocusChangeListener() {
+            @Override
+            public void onFocusChange(View v, boolean hasFocus) {
+                v.animate()
+                        .scaleX(hasFocus ? scale : 1f)
+                        .scaleY(hasFocus ? scale : 1f)
+                        .setDuration(120L)
+                        .setInterpolator(new DecelerateInterpolator(1.6f))
+                        .start();
+            }
+        });
     }
 
     private void bind(int id, final ComponentName target, final String fallbackAction) {

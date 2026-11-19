@@ -1,23 +1,56 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  The panel slab. Mirrors the launcher's glass theme: a white gradient at 21% -> 7%
-  over the window dim, a 1dp hairline, and the dock's rounded left edge.
+  Liquid Glass sheet. Same material as the launcher theme (liquid.json):
+  white 22% -> 6% fill, 1dp white rim, and a soft specular bloom at the top
+  left where the sheet catches the light. The bloom is static: this TV has no
+  pointer, and window blur is disabled (mBlurEnabled=false), so the dim behind
+  stays the only backdrop.
 
-  No blur: the translucent fill plus the dim behind it is what sells the glass at
-  ten feet, and it costs one draw call on a weak GPU.
+  Geometry is the approved mockup at half scale: 332dp sheet, 16dp corners.
 -->
-<shape xmlns:android="http://schemas.android.com/apk/res/android"
-    android:shape="rectangle">
-    <gradient
-        android:angle="270"
-        android:startColor="#42FFFFFF"
-        android:endColor="#17FFFFFF" />
-    <corners
-        android:topLeftRadius="16dp"
-        android:bottomLeftRadius="16dp"
-        android:topRightRadius="0dp"
-        android:bottomRightRadius="0dp" />
-    <stroke
-        android:width="1dp"
-        android:color="#3DFFFFFF" />
-</shape>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <shape android:shape="rectangle">
+            <gradient
+                android:angle="270"
+                android:startColor="#38FFFFFF"
+                android:endColor="#10FFFFFF" />
+            <corners
+                android:topLeftRadius="16dp"
+                android:bottomLeftRadius="16dp"
+                android:topRightRadius="0dp"
+                android:bottomRightRadius="0dp" />
+        </shape>
+    </item>
+
+    <!-- Specular bloom, mirroring the tile sheen at the top of the sheet. -->
+    <item>
+        <shape android:shape="rectangle">
+            <gradient
+                android:type="radial"
+                android:gradientRadius="360dp"
+                android:centerX="0.18"
+                android:centerY="0.0"
+                android:startColor="#33FFFFFF"
+                android:endColor="#00FFFFFF" />
+            <corners
+                android:topLeftRadius="16dp"
+                android:bottomLeftRadius="16dp"
+                android:topRightRadius="0dp"
+                android:bottomRightRadius="0dp" />
+        </shape>
+    </item>
+
+    <item>
+        <shape android:shape="rectangle">
+            <corners
+                android:topLeftRadius="16dp"
+                android:bottomLeftRadius="16dp"
+                android:topRightRadius="0dp"
+                android:bottomRightRadius="0dp" />
+            <stroke
+                android:width="1dp"
+                android:color="#5CFFFFFF" />
+        </shape>
+    </item>
+</layer-list>

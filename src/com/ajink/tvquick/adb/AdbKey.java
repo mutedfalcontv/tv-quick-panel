@@ -55,6 +55,9 @@ public final class AdbKey {
     }
 
     public static synchronized PrivateKey get(Context context) {
+        // Reset first: the name is per-call state, never carry one over from a
+        // previous context or a key that has since been replaced.
+        sName = KEY_NAME;
         PrivateKey pushed = readPushedKey(context);
         if (pushed != null) {
             sName = readPushedKeyName(context);

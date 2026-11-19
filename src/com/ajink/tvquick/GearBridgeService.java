@@ -5,7 +5,10 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.content.BroadcastReceiver;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.ServiceInfo;
 import android.os.Build;
 import android.os.IBinder;
@@ -16,6 +19,8 @@ import android.util.Log;
 import com.ajink.tvquick.adb.AdbConnection;
 import com.ajink.tvquick.adb.AdbKey;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.security.PrivateKey;
 
 /**
@@ -94,13 +99,6 @@ public class GearBridgeService extends Service {
 
     private static final long ASSIST_DEBOUNCE_MS = 1500;
 
-    /**
-     * The RC600 remote's evdev node. Hardcoded because the app cannot enumerate
-     * /dev/input itself; it matches this TV's stable enumeration (verified with
-     * {@code getevent -p}, where both the RC600 and the IR receiver report
-     * scancode 0x01f5).
-     */
-    private static final String GEAR_DEVICE = "/dev/input/event4";
 
     /**
      * Size of {@code struct input_event}: timeval (two longs) + u16 type +
@@ -111,7 +109,28 @@ public class GearBridgeService extends Service {
 
     /** Debounce for the gear, in case getevent repeats the down event. */
     private static final long GEAR_DEBOUNCE_MS = 250;
-    private static final long AUTH_WAIT_MS = 120_000;
+    /**
+     * How long the first connect waits for the TV's "Allow USB debugging?"
+     * prompt. Five minutes: on a cold boot the prompt can sit on screen while
+     * the user finds the remote, and closing the transport early loses the
+     * always-allow grant.
+     */
+    private static final long AUTH_WAIT_MS = 300_000;
+
+    /**
+     * How long the event stream may stay silent before the watchdog verifies
+     * that the {@code cat} shell on the adbd side is still running. A standby
+     * kills that child without adbd ever reporting it: no CLSE, no EOF, the TCP
+     * connection just stays ESTABLISHED - which is what stranded the bridge
+     * after every standby until the app was killed and reopened.
+     */
+    private static final long STREAM_SILENCE_MS = 60_000;
+
+    /** How often the watchdog thread wakes up to look at the stream. */
+    private static final long WATCHDOG_POLL_MS = 10_000;
+
+    /** Budget for the liveness probe and the getevent -p listing. */
+    private static final long SHELL_PROBE_TIMEOUT_MS = 10_000;
 
     private static final String PANEL_ACTION_TOGGLE = QuickPanelActivity.ACTION_TOGGLE;
     private static final String PANEL_COMPONENT =
@@ -123,9 +142,53 @@ public class GearBridgeService extends Service {
     private volatile boolean mRetryNow;
     private long mLastGearAt;
     private long mLastAssistAt;
-    /** True while the gear is physically held, so only a fresh press toggles. */
-    private boolean mGearDown;
-    private String mState = "starting";
+
+    /** The evdev node whose {@code cat} shell is expected to be streaming, or null. */
+    private volatile String mStreamDevice;
+    /** When the event stream last delivered bytes; the watchdog compares against it. */
+    private volatile long mLastStreamDataAt;
+    /** Set by the screen-on receiver: verify the stream on the next watchdog pass. */
+    private volatile boolean mVerifyNow;
+    private Thread mWatchdog;
+
+    private final BroadcastReceiver mScreenReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            // Standby is exactly when the shell dies silently, so verify the
+            // stream the moment the screen is back instead of waiting out the
+            // whole silence window.
+            Log.i(TAG, "screen on - verifying the event stream");
+            mVerifyNow = true;
+        }
+    };
+
+    /** Explicit connection phase; the notification text is its only user-visible trace. */
+    enum BridgeState {
+        STARTING("starting"),
+        CONNECTING("connecting"),
+        CONNECTED("connected"),
+        AUTHORIZING("authorize"),
+        RECONNECTING("reconnecting"),
+        STOPPED("stopped");
+
+        final String text;
+
+        BridgeState(String text) {
+            this.text = text;
+        }
+    }
+
+    /**
+     * Explicit gear latch. DOWN means the physical button is held and only a release
+     * re-arms it, so the kernel's repeat events can never toggle the panel twice.
+     */
+    enum GearLatch {
+        UP,
+        DOWN
+    }
+
+    private volatile BridgeState mState = BridgeState.STARTING;
+    private GearLatch mLatch = GearLatch.UP;
 
     public static void start(android.content.Context context) {
         Intent i = new Intent(context, GearBridgeService.class);
@@ -155,6 +218,16 @@ public class GearBridgeService extends Service {
         }, "gear-bridge");
         mWorker.setDaemon(true);
         mWorker.start();
+
+        registerReceiver(mScreenReceiver, new IntentFilter(Intent.ACTION_SCREEN_ON));
+        mWatchdog = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                watchdogLoop();
+            }
+        }, "gear-watchdog");
+        mWatchdog.setDaemon(true);
+        mWatchdog.start();
     }
 
     @Override
@@ -181,6 +254,12 @@ public class GearBridgeService extends Service {
     @Override
     public void onDestroy() {
         mRunning = false;
+        setState(BridgeState.STOPPED);
+        try {
+            unregisterReceiver(mScreenReceiver);
+        } catch (Exception ignored) {
+            // best effort; the receiver may never have been registered
+        }
         AdbConnection c = mConnection;
         mConnection = null;
         if (c != null) {
@@ -217,16 +296,50 @@ public class GearBridgeService extends Service {
         while (mRunning) {
             AdbConnection connection = null;
             try {
+                setState(BridgeState.CONNECTING);
                 Log.i(TAG, "connecting to adb " + ADB_HOST + ":" + ADB_PORT);
                 connection = AdbConnection.open(ADB_HOST, ADB_PORT, key, (int) AUTH_WAIT_MS);
                 mConnection = connection;
                 backoff = 1000;
                 authFailures = 0;
-                setState("connected");
-                Log.i(TAG, "adb connected, opening the RC600 node");
+                // A fresh transport carries no history: whatever the latch remembered
+                // before the reconnect is stale, so start from UP and let the next
+                // physical press arm it normally.
+                mLatch = GearLatch.UP;
+                setState(BridgeState.CONNECTED);
+                Log.i(TAG, "adb connected, looking for the RC600 node");
 
-                AdbConnection.Stream stream = connection.openShell("cat " + GEAR_DEVICE);
-                Log.i(TAG, "reading " + GEAR_DEVICE);
+                // The node number is not stable across reboots, and the BLE
+                // remote only exposes it after it wakes. Resolve by name and
+                // wait on the SAME transport until it appears - every new
+                // transport makes this firmware raise a fresh "Allow USB
+                // debugging?" dialog, so reconnecting per probe would flood
+                // the screen with prompts while the remote is asleep.
+                String device = findGearDevice(connection);
+                int absentProbes = 0;
+                while (device == null && mRunning) {
+                    setState(BridgeState.RECONNECTING);
+                    if (absentProbes == 0) {
+                        Log.i(TAG, "RC600 input node not present yet; waiting on this transport");
+                    }
+                    absentProbes++;
+                    try {
+                        Thread.sleep(2000);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    }
+                    // Transport trouble throws and falls into the reconnect path.
+                    device = findGearDevice(connection);
+                }
+                if (!mRunning) {
+                    return;
+                }
+                Log.i(TAG, "reading " + device);
+
+                AdbConnection.Stream stream = connection.openShell("cat " + device);
+                mStreamDevice = device;
+                mLastStreamDataAt = SystemClock.elapsedRealtime();
 
                 byte[] chunk = new byte[4096];
                 byte[] event = new byte[mEventSize];
@@ -234,6 +347,9 @@ public class GearBridgeService extends Service {
                 int n;
                 long received = 0;
                 while (mRunning && (n = stream.read(chunk)) >= 0) {
+                    if (n > 0) {
+                        mLastStreamDataAt = SystemClock.elapsedRealtime();
+                    }
                     received += n;
                     for (int i = 0; i < n; i++) {
                         event[have++] = chunk[i];
@@ -244,11 +360,12 @@ public class GearBridgeService extends Service {
                     }
                 }
                 if (mRunning) {
+                    setState(BridgeState.RECONNECTING);
                     Log.w(TAG, "input stream ended after " + received + " bytes");
                     backoff = 2000;
                 }
             } catch (AdbConnection.AuthRequiredException e) {
-                setState("authorize");
+                setState(BridgeState.AUTHORIZING);
                 authFailures++;
                 // Every reconnect attempt makes adbd raise a fresh "Allow USB
                 // debugging?" dialog. Back off hard so the screen is not
@@ -262,9 +379,10 @@ public class GearBridgeService extends Service {
                 backoff = Math.min(backoff * 2, 30_000);
                 if (mRunning) {
                     Log.w(TAG, "adb bridge: " + e);
-                    setState("reconnecting");
+                    setState(BridgeState.RECONNECTING);
                 }
             } finally {
+                mStreamDevice = null;
                 mConnection = null;
                 if (connection != null) {
                     try {
@@ -300,6 +418,122 @@ public class GearBridgeService extends Service {
     }
 
     /**
+     * Finds the RC600 evdev node by name. The node number is not stable across
+     * reboots, and this BLE remote only exposes the node after it wakes, so the
+     * lookup runs on every connect and the caller retries while it is absent.
+     * Returns null only when the listing answered and named no RC600; transport
+     * trouble propagates so the caller reconnects instead of waiting forever on
+     * a dead connection.
+     */
+    private String findGearDevice(AdbConnection connection) throws IOException {
+        AdbConnection.Stream probe = connection.openShell("getevent -p");
+        StringBuilder out = new StringBuilder(4096);
+        byte[] buffer = new byte[2048];
+        long deadline = SystemClock.elapsedRealtime() + SHELL_PROBE_TIMEOUT_MS;
+        int n;
+        while ((n = probe.read(buffer)) >= 0) {
+            out.append(new String(buffer, 0, n, StandardCharsets.UTF_8));
+            if (out.length() > 64 * 1024
+                    || SystemClock.elapsedRealtime() > deadline) {
+                break;
+            }
+        }
+        String current = null;
+        for (String line : out.toString().split("\n")) {
+            String trimmed = line.trim();
+            if (trimmed.startsWith("add device")) {
+                int colon = trimmed.indexOf(": ");
+                if (colon > 0) {
+                    current = trimmed.substring(colon + 2).trim();
+                }
+            } else if (current != null && trimmed.startsWith("name:")
+                    && trimmed.contains("RC600")) {
+                return current;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Watches the event stream for a silent death. A standby kills the
+     * {@code cat} child on the adbd side without any protocol trace: this
+     * firmware's adbd never sends CLSE and never closes the socket, so the
+     * worker blocks in {@code Stream.read} forever on a connection that looks
+     * perfectly healthy. When no byte has arrived for a while - or the screen
+     * just came back on, which is when the kill happens - a side stream checks
+     * the process table. If the {@code cat} is gone the connection is torn down
+     * and the worker's read fails, which runs the normal reconnect path.
+     */
+    private void watchdogLoop() {
+        while (mRunning) {
+            long deadline = SystemClock.elapsedRealtime() + WATCHDOG_POLL_MS;
+            while (mRunning && SystemClock.elapsedRealtime() < deadline && !mVerifyNow) {
+                try {
+                    Thread.sleep(500);
+                } catch (InterruptedException e) {
+                    // Conditions are re-evaluated; shutdown is noticed via mRunning.
+                }
+            }
+            if (!mRunning) {
+                return;
+            }
+            boolean verifyRequested = mVerifyNow;
+            mVerifyNow = false;
+            AdbConnection connection = mConnection;
+            String device = mStreamDevice;
+            if (connection == null || device == null || connection.isClosed()) {
+                continue;
+            }
+            long since = SystemClock.elapsedRealtime() - mLastStreamDataAt;
+            if (!verifyRequested && since < STREAM_SILENCE_MS) {
+                continue;
+            }
+            if (isEventStreamAlive(connection, device)) {
+                mLastStreamDataAt = SystemClock.elapsedRealtime();
+                continue;
+            }
+            Log.w(TAG, "event stream died silently; forcing a reconnect");
+            try {
+                connection.close();
+            } catch (Exception ignored) {
+                // The worker notices the closed stream and reconnects.
+            }
+        }
+    }
+
+    /**
+     * True when a {@code cat} process for this evdev node is still running on
+     * the adbd side. The probe runs as the shell user, the same uid as adbd's
+     * children, so their process table is readable: {@code pgrep -x cat} lists
+     * every cat, and the cmdline filter picks the one reading this node.
+     */
+    private boolean isEventStreamAlive(AdbConnection connection, String device) {
+        try {
+            AdbConnection.Stream probe = connection.openShell(
+                    "for p in $(pgrep -x cat 2>/dev/null); do "
+                            + "tr '\\0' ' ' < /proc/$p/cmdline 2>/dev/null; done"
+                            + " | grep -F 'cat " + device + "'");
+            StringBuilder out = new StringBuilder();
+            byte[] buffer = new byte[2048];
+            long deadline = SystemClock.elapsedRealtime() + SHELL_PROBE_TIMEOUT_MS;
+            int n;
+            while ((n = probe.read(buffer)) >= 0) {
+                out.append(new String(buffer, 0, n, StandardCharsets.UTF_8));
+                if (out.length() > 16 * 1024
+                        || SystemClock.elapsedRealtime() > deadline) {
+                    break;
+                }
+            }
+            boolean alive = out.toString().contains("cat " + device);
+            Log.i(TAG, "event stream liveness: " + (alive ? "alive" : "gone"));
+            return alive;
+        } catch (Exception e) {
+            Log.w(TAG, "event stream liveness check failed: " + e);
+            return false;
+        }
+    }
+
+    /**
      * Parses one {@code struct input_event}: timeval, then u16 type, u16 code
      * and s32 value, all little-endian.
      *
@@ -329,10 +563,10 @@ public class GearBridgeService extends Service {
     private void handleGear(int value) {
         if (value == 0) {
             // Release: re-arm the latch.
-            mGearDown = false;
+            mLatch = GearLatch.UP;
             return;
         }
-        if (value != 1 || mGearDown) {
+        if (value != 1 || mLatch == GearLatch.DOWN) {
             // Repeat of a held key, or a value we do not care about.
             return;
         }
@@ -340,7 +574,7 @@ public class GearBridgeService extends Service {
         if (now - mLastGearAt < GEAR_DEBOUNCE_MS) {
             return;
         }
-        mGearDown = true;
+        mLatch = GearLatch.DOWN;
         mLastGearAt = now;
         Log.i(TAG, "gear pressed");
         togglePanel();
@@ -429,11 +663,17 @@ public class GearBridgeService extends Service {
         }
     }
 
-    private void setState(String state) {
-        if (state.equals(mState)) {
-            return;
+    /**
+     * Records the connection phase and refreshes the notification that exposes it.
+     * Only transitions are published, so repeated calls are free.
+     */
+    private void setState(BridgeState state) {
+        synchronized (this) {
+            if (state == mState) {
+                return;
+            }
+            mState = state;
         }
-        mState = state;
         NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
         if (nm != null) {
             nm.notify(NOTIFICATION_ID, buildNotification());
@@ -455,7 +695,7 @@ public class GearBridgeService extends Service {
         return builder
                 .setSmallIcon(R.drawable.ic_gear)
                 .setContentTitle(getString(R.string.bridge_title))
-                .setContentText(getString(R.string.bridge_state, mState))
+                .setContentText(getString(R.string.bridge_state, mState.text))
                 .setContentIntent(content)
                 .setOngoing(true)
                 .setShowWhen(false)
